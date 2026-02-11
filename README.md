@@ -2,7 +2,7 @@
 
 A sophisticated, web-based USB HID injector and remote keyboard control system running on the ESP32-S3. This project utilizes the S3's native USB capabilities and massive PSRAM to buffer and execute large Ducky Scripts over Wi-Fi.
 
-## ⚡ Features
+##  Features
 
 * **Web-Based IDE:** Write, save, run, and delete scripts directly from your browser.
 * **Massive Payload Support:** Uses the 8MB PSRAM to buffer scripts up to 2MB in size (far exceeding standard microcontroller limits).
@@ -11,7 +11,7 @@ A sophisticated, web-based USB HID injector and remote keyboard control system r
 * **Visual Feedback:** RGB NeoPixel integration (Blue=Busy, Green=Ready, White=Processing).
 * **Safety:** Emergency Stop button to immediately halt script execution.
 
-## 🛠 Hardware Supported
+##  Hardware Supported
 
 * **Chip:** ESP32-S3 (N16R8 variant recommended).
 * **Specs:** 16MB Flash, 8MB Octal PSRAM (OPI).
@@ -24,7 +24,7 @@ A sophisticated, web-based USB HID injector and remote keyboard control system r
 
 > **Note:** You must use the **Native USB** port (often labeled "USB" or connected to GPIO 19/20), not the UART/COM port, for HID injection to work.
 
-## 🚀 Installation (PlatformIO)
+##  Installation (PlatformIO)
 
 This project is designed for **PlatformIO**.
 
@@ -36,4 +36,4 @@ ESP32-Ducky-Pro/
 │   └── main.cpp       # The source code provided
 ├── data/              # (Optional) For initial file uploads
 ├── platformio.ini     # Configuration below
-└── README.
+└── README.md

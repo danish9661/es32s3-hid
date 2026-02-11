@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/extensions.json
+.gitignore
+include/README
+test/README
+lib/README
+.gitignore
