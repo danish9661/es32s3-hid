@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32-S3 HID Login</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="login-page">
+  <main class="panel login-card">
+    <h1 class="login-title">ESP32-S3 HID Console</h1>
+    <p class="login-sub">Single-operator mode enabled for secure remote control.</p>
+
+    <form id="login-form" class="login-grid">
+      <div>
+        <label class="label" for="user">Username</label>
+        <input class="input" id="user" type="text" autocomplete="username" required>
+      </div>
+      <div>
+        <label class="label" for="pass">Password</label>
+        <input class="input" id="pass" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="btn-primary" type="submit">Sign In</button>
+    </form>
+
+    <div id="login-msg" class="login-msg"></div>
+    <p class="small">Board profile: ESP32-S3 R8N16</p>
+  </main>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const msg = document.getElementById("login-msg");
+
+    async function checkSession() {
+      try {
+        const res = await fetch("/api/login_status");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.loggedIn) {
+          window.location.href = "/app";
+          return;
+        }
+        if (data.locked) {
+          msg.textContent = "Another user is currently logged in.";
+        }
+      } catch (_) {
+        msg.textContent = "Device is not reachable.";
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      msg.textContent = "Signing in...";
+
+      const payload = {
+        user: document.getElementById("user").value,
+        pass: document.getElementById("pass").value,
+      };
+
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          msg.textContent = "Login success.";
+          window.location.href = "/app";
+          return;
+        }
+
+        if (res.status === 409) {
+          msg.textContent = "Session locked: one user is already active.";
+        } else if (res.status === 401) {
+          msg.textContent = "Invalid username or password.";
+        } else {
+          msg.textContent = "Login failed. Try again.";
+        }
+      } catch (_) {
+        msg.textContent = "Network error while logging in.";
+      }
+    });
+
+    checkSession();
+  </script>
+</body>
+</html>

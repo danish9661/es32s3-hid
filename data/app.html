@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32-S3 HID Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="layout">
+    <header class="topbar">
+      <div class="brand">ESP32-S3 HID Console</div>
+      <div class="topbar-right">
+        <span id="run-state" class="badge">Checking status...</span>
+        <button id="stop-btn" class="btn-danger">Stop</button>
+        <button id="logout-btn" class="btn-outline">Logout</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="editor">Editor</button>
+      <button class="tab-btn" data-tab="remote">Remote</button>
+      <button class="tab-btn" data-tab="keyboard">Keyboard</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
+
+    <main class="content">
+      <section id="view-editor" class="view editor-grid active">
+        <aside class="panel files-box">
+          <div class="files-head">
+            <strong>Scripts</strong>
+            <button id="new-file-btn" class="btn-outline">New</button>
+          </div>
+          <div id="files-list" class="files-list"></div>
+        </aside>
+
+        <section class="panel editor-box">
+          <div class="toolbar">
+            <button id="save-btn" class="btn-primary">Save</button>
+            <button id="run-btn">Run Script</button>
+            <button id="delete-btn" class="btn-danger">Delete</button>
+            <button id="download-btn" class="btn-outline">Download</button>
+            <span id="current-file" class="editor-meta">No file selected</span>
+          </div>
+          <textarea id="code-area" spellcheck="false" placeholder="Write Ducky Script here..."></textarea>
+          <div id="editor-status" class="status-line">Ready.</div>
+        </section>
+      </section>
+
+      <section id="view-remote" class="view">
+        <div class="panel remote-box">
+          <h2>Live Text Injection</h2>
+          <label class="label" for="live-text">Text to inject</label>
+          <textarea id="live-text" rows="6" placeholder="Paste or type text to send..."></textarea>
+          <div class="toolbar" style="margin-top:10px;">
+            <button id="inject-btn" class="btn-primary">Inject Text</button>
+            <button id="clear-live-btn" class="btn-outline">Clear</button>
+          </div>
+          <div id="remote-status" class="status-line">Idle.</div>
+
+          <h3 style="margin-top:16px;">Quick Actions</h3>
+          <div class="remote-grid">
+            <button class="key" data-combo="ctrl+a">Select All</button>
+            <button class="key" data-combo="ctrl+c">Copy</button>
+            <button class="key" data-combo="ctrl+v">Paste</button>
+            <button class="key" data-key="176">Enter</button>
+            <button class="key" data-key="179">Tab</button>
+            <button class="key" data-key="177">Esc</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-keyboard" class="view">
+        <div class="panel keyboard-box">
+          <h2>Quick Keyboard</h2>
+          <p class="small">Useful shortcuts and navigation keys for remote operation.</p>
+          <div class="key-grid">
+            <button class="key" data-key="216">Left</button>
+            <button class="key" data-key="218">Up</button>
+            <button class="key" data-key="217">Down</button>
+            <button class="key" data-key="215">Right</button>
+            <button class="key" data-key="178">Backspace</button>
+            <button class="key" data-key="212">Delete</button>
+            <button class="key" data-combo="gui+r">Win + R</button>
+            <button class="key" data-combo="alt+f4">Alt + F4</button>
+            <button class="key" data-combo="ctrl+s">Ctrl + S</button>
+            <button class="key" data-combo="ctrl+z">Ctrl + Z</button>
+            <button class="key" data-combo="ctrl+x">Ctrl + X</button>
+            <button class="key" data-combo="ctrl+y">Ctrl + Y</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="panel settings-box">
+          <h2>Device Settings</h2>
+          <div class="settings-grid">
+            <div>
+              <label class="label" for="ap-ssid">AP SSID</label>
+              <input class="input" id="ap-ssid" type="text">
+            </div>
+            <div>
+              <label class="label" for="ap-pass">AP Password</label>
+              <input class="input" id="ap-pass" type="password">
+            </div>
+            <div>
+              <label class="label" for="sta-ssid">Router SSID</label>
+              <input class="input" id="sta-ssid" type="text">
+            </div>
+            <div>
+              <label class="label" for="sta-pass">Router Password</label>
+              <input class="input" id="sta-pass" type="password">
+            </div>
+            <div>
+              <label class="label" for="admin-user">Login Username</label>
+              <input class="input" id="admin-user" type="text">
+            </div>
+            <div>
+              <label class="label" for="admin-pass">New Login Password (optional)</label>
+              <input class="input" id="admin-pass" type="password" placeholder="Leave empty to keep unchanged">
+            </div>
+            <div>
+              <label class="label" for="typing-delay">Typing Delay (ms)</label>
+              <input class="input" id="typing-delay" type="number" min="0" max="40">
+            </div>
+            <div>
+              <label class="label" for="burst-chars">Burst Characters</label>
+              <input class="input" id="burst-chars" type="number" min="6" max="96">
+            </div>
+            <div>
+              <label class="label" for="burst-pause">Burst Pause (ms)</label>
+              <input class="input" id="burst-pause" type="number" min="0" max="120">
+            </div>
+            <div>
+              <label class="label" for="line-delay">Newline Pause (ms)</label>
+              <input class="input" id="line-delay" type="number" min="0" max="250">
+            </div>
+            <div>
+              <label class="label" for="led-bright">LED Brightness</label>
+              <input class="input" id="led-bright" type="number" min="0" max="255">
+            </div>
+          </div>
+
+          <div class="settings-actions">
+            <button id="save-settings-btn" class="btn-primary">Save Settings</button>
+            <button id="reboot-btn" class="btn-danger">Reboot Device</button>
+          </div>
+
+          <p class="footer-note">For AP password, use at least 8 characters. Typing speed can be increased safely using delay + burst tuning together.</p>
+          <div id="settings-status" class="status-line"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
