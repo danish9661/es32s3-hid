@@ -70,7 +70,12 @@
           return;
         }
 
-        if (res.status === 409) {
+        if (res.status === 429) {
+          const body = await res.json().catch(() => ({}));
+          const retryMs = Number(body.retry_after_ms || 0);
+          const retrySec = Math.max(1, Math.ceil(retryMs / 1000));
+          msg.textContent = `Too many attempts. Try again in ${retrySec}s.`;
+        } else if (res.status === 409) {
           msg.textContent = "Session locked: one user is already active.";
         } else if (res.status === 401) {
           msg.textContent = "Invalid username or password.";

@@ -110,6 +110,20 @@ Security note:
 - ESP32 AsyncWebServer in this project serves HTTP locally.
 - For internet use, terminate HTTPS on a trusted tunnel/proxy layer.
 
+### Recommended HTTPS + Token Flow (Reverse Proxy)
+
+1. Keep ESP32 on LAN only (no direct public port forward).
+2. Put Nginx/Caddy/Cloudflare Tunnel in front with HTTPS.
+3. Enable `reverse-proxy token auth` in Settings and generate a token.
+4. Configure proxy to add these headers to ESP32 upstream requests:
+  - `X-Proxy-Token: <your-token>`
+  - `X-Forwarded-Proto: https`
+5. Keep app login enabled for user sessions (single active user mode).
+
+This gives a two-layer model:
+- HTTPS + token check at reverse-proxy boundary
+- Application login/session control inside ESP32
+
 ## API Overview
 
 Auth/session:
@@ -129,14 +143,26 @@ Live control:
 - `POST /api/live_text`
 - `POST /api/live_key`
 - `POST /api/live_combo`
+- `POST /api/kbd_event`
+- `POST /api/mouse_move`
+- `POST /api/mouse_scroll`
+- `POST /api/mouse_button`
 
 Settings:
 - `GET /api/get_settings`
 - `POST /api/save_settings`
 - `POST /api/reboot`
+- `GET /api/proxy_profile`
 
 ## Notes
 
 - Use native USB port for HID.
 - If LED pin differs on your board variant, set `STATUS_LED_PIN` in build flags.
 - Script files are stored under `/scripts` in LittleFS.
+
+## Performance / Core Split
+
+- Core 1: script parsing + high-volume text worker queue
+- Core 0: realtime HID events (keyboard/mouse)
+
+This split keeps the UI responsive even when script jobs are active and improves input stability under load.

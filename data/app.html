@@ -21,6 +21,7 @@
       <button class="tab-btn active" data-tab="editor">Editor</button>
       <button class="tab-btn" data-tab="remote">Remote</button>
       <button class="tab-btn" data-tab="keyboard">Keyboard</button>
+      <button class="tab-btn" data-tab="mouse">Mouse</button>
       <button class="tab-btn" data-tab="settings">Settings</button>
     </nav>
 
@@ -60,40 +61,67 @@
 
           <h3 style="margin-top:16px;">Quick Actions</h3>
           <div class="remote-grid">
-            <button class="key" data-combo="ctrl+a">Select All</button>
-            <button class="key" data-combo="ctrl+c">Copy</button>
-            <button class="key" data-combo="ctrl+v">Paste</button>
-            <button class="key" data-key="176">Enter</button>
-            <button class="key" data-key="179">Tab</button>
-            <button class="key" data-key="177">Esc</button>
+            <button class="key" data-action-key="178">Backspace</button>
+            <button class="key" data-action-key="212">Delete</button>
+            <button class="key" data-action-key="216">Left</button>
+            <button class="key" data-action-key="218">Up</button>
+            <button class="key" data-action-key="217">Down</button>
+            <button class="key" data-action-key="215">Right</button>
+            <button class="key" data-action-combo="ctrl+z">Undo</button>
+            <button class="key" data-action-combo="ctrl+y">Redo</button>
           </div>
+
+          <h3 style="margin-top:16px;">Custom Shortcut Buttons</h3>
+          <div class="custom-builder">
+            <input id="custom-action-label" class="input" type="text" placeholder="Button label (example: Save As)">
+            <input id="custom-action-combo" class="input" type="text" placeholder="Shortcut (example: ctrl+shift+s)">
+            <button id="add-custom-action-btn" class="btn-primary">Add</button>
+          </div>
+          <div id="custom-actions-list" class="remote-grid" style="margin-top:10px;"></div>
+          <p class="small">Supported format: ctrl/alt/shift/win + key (example: ctrl+shift+n, alt+tab, win+r)</p>
         </div>
       </section>
 
       <section id="view-keyboard" class="view">
         <div class="panel keyboard-box">
-          <h2>Quick Keyboard</h2>
-          <p class="small">Useful shortcuts and navigation keys for remote operation.</p>
-          <div class="key-grid">
-            <button class="key" data-key="216">Left</button>
-            <button class="key" data-key="218">Up</button>
-            <button class="key" data-key="217">Down</button>
-            <button class="key" data-key="215">Right</button>
-            <button class="key" data-key="178">Backspace</button>
-            <button class="key" data-key="212">Delete</button>
-            <button class="key" data-combo="gui+r">Win + R</button>
-            <button class="key" data-combo="alt+f4">Alt + F4</button>
-            <button class="key" data-combo="ctrl+s">Ctrl + S</button>
-            <button class="key" data-combo="ctrl+z">Ctrl + Z</button>
-            <button class="key" data-combo="ctrl+x">Ctrl + X</button>
-            <button class="key" data-combo="ctrl+y">Ctrl + Y</button>
+          <h2>Full 65% Keyboard</h2>
+          <p class="small">Touch keys behave like real key down/up events. Use modifier lock buttons for shortcuts with single-finger use.</p>
+
+          <div class="modifier-locks">
+            <button class="mod-lock" data-mod-code="128">Ctrl Lock</button>
+            <button class="mod-lock" data-mod-code="129">Shift Lock</button>
+            <button class="mod-lock" data-mod-code="130">Alt Lock</button>
+            <button class="mod-lock" data-mod-code="131">Win Lock</button>
+            <button id="release-all-keys-btn" class="btn-outline">Release All</button>
           </div>
+
+          <div id="keyboard-65" class="keyboard-65"></div>
+          <div id="keyboard-status" class="status-line">Keyboard ready.</div>
+        </div>
+      </section>
+
+      <section id="view-mouse" class="view">
+        <div class="panel mouse-box">
+          <h2>Mouse</h2>
+          <p class="small">Use the trackpad area for pointer movement. Two-finger drag tries to send vertical scrolling.</p>
+
+          <div id="trackpad" class="trackpad">Trackpad Area</div>
+
+          <div class="toolbar" style="margin-top:12px;">
+            <button id="mouse-left-btn">Left Click</button>
+            <button id="mouse-right-btn">Right Click</button>
+            <button id="mouse-left-hold-btn" class="btn-outline">Hold Left</button>
+            <button id="mouse-release-btn" class="btn-outline">Release Buttons</button>
+          </div>
+
+          <div id="mouse-status" class="status-line">Mouse idle.</div>
         </div>
       </section>
 
       <section id="view-settings" class="view">
         <div class="panel settings-box">
           <h2>Device Settings</h2>
+
           <div class="settings-grid">
             <div>
               <label class="label" for="ap-ssid">AP SSID</label>
@@ -119,25 +147,73 @@
               <label class="label" for="admin-pass">New Login Password (optional)</label>
               <input class="input" id="admin-pass" type="password" placeholder="Leave empty to keep unchanged">
             </div>
+          </div>
+
+          <h3 style="margin-top:16px;">Typing Engine Tuning</h3>
+          <div class="slider-grid">
+            <div class="slider-item">
+              <div class="label-row">
+                <label class="label" for="typing-delay">Typing Delay (ms)</label>
+                <button class="help-icon" data-help-key="typing-delay">?</button>
+              </div>
+              <input id="typing-delay" type="range" min="0" max="40" step="1">
+              <div id="typing-delay-value" class="slider-value">0 ms</div>
+            </div>
+
+            <div class="slider-item">
+              <div class="label-row">
+                <label class="label" for="burst-chars">Burst Characters</label>
+                <button class="help-icon" data-help-key="burst-chars">?</button>
+              </div>
+              <input id="burst-chars" type="range" min="6" max="96" step="1">
+              <div id="burst-chars-value" class="slider-value">0</div>
+            </div>
+
+            <div class="slider-item">
+              <div class="label-row">
+                <label class="label" for="burst-pause">Burst Pause (ms)</label>
+                <button class="help-icon" data-help-key="burst-pause">?</button>
+              </div>
+              <input id="burst-pause" type="range" min="0" max="120" step="1">
+              <div id="burst-pause-value" class="slider-value">0 ms</div>
+            </div>
+
+            <div class="slider-item">
+              <div class="label-row">
+                <label class="label" for="line-delay">Newline Pause (ms)</label>
+                <button class="help-icon" data-help-key="line-delay">?</button>
+              </div>
+              <input id="line-delay" type="range" min="0" max="250" step="1">
+              <div id="line-delay-value" class="slider-value">0 ms</div>
+            </div>
+          </div>
+
+          <div style="margin-top:12px; max-width:340px;">
+            <label class="label" for="led-bright">LED Brightness</label>
+            <input class="input" id="led-bright" type="number" min="0" max="255">
+          </div>
+
+          <h3 style="margin-top:16px;">Security / Reverse Proxy</h3>
+          <div class="settings-grid">
             <div>
-              <label class="label" for="typing-delay">Typing Delay (ms)</label>
-              <input class="input" id="typing-delay" type="number" min="0" max="40">
+              <label class="checkbox-row">
+                <input id="login-rate-limit" type="checkbox">
+                <span>Enable brute-force login rate limit</span>
+              </label>
             </div>
             <div>
-              <label class="label" for="burst-chars">Burst Characters</label>
-              <input class="input" id="burst-chars" type="number" min="6" max="96">
+              <label class="checkbox-row">
+                <input id="proxy-auth-enabled" type="checkbox">
+                <span>Enable reverse-proxy token auth</span>
+              </label>
             </div>
-            <div>
-              <label class="label" for="burst-pause">Burst Pause (ms)</label>
-              <input class="input" id="burst-pause" type="number" min="0" max="120">
-            </div>
-            <div>
-              <label class="label" for="line-delay">Newline Pause (ms)</label>
-              <input class="input" id="line-delay" type="number" min="0" max="250">
-            </div>
-            <div>
-              <label class="label" for="led-bright">LED Brightness</label>
-              <input class="input" id="led-bright" type="number" min="0" max="255">
+            <div style="grid-column: 1 / -1;">
+              <label class="label" for="proxy-auth-token">Proxy Auth Token</label>
+              <div class="token-row">
+                <input class="input" id="proxy-auth-token" type="text" placeholder="Minimum 16 chars">
+                <button id="generate-proxy-token" class="btn-outline">Generate</button>
+              </div>
+              <p class="small">Use this token in header X-Proxy-Token on your HTTPS reverse proxy.</p>
             </div>
           </div>
 
@@ -146,8 +222,16 @@
             <button id="reboot-btn" class="btn-danger">Reboot Device</button>
           </div>
 
-          <p class="footer-note">For AP password, use at least 8 characters. Typing speed can be increased safely using delay + burst tuning together.</p>
           <div id="settings-status" class="status-line"></div>
+
+          <div id="help-panel" class="help-panel hidden">
+            <div class="help-head">
+              <strong id="help-title">Help</strong>
+              <button id="help-close" class="btn-outline">Close</button>
+            </div>
+            <p id="help-body" class="small"></p>
+            <p id="help-best" class="small"></p>
+          </div>
         </div>
       </section>
     </main>

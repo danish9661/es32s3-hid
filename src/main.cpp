@@ -7,6 +7,7 @@
 #include <Adafruit_NeoPixel.h>
 #include "USB.h"
 #include "USBHIDKeyboard.h"
+#include "USBHIDMouse.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 
@@ -18,20 +19,12 @@
 constexpr uint8_t NUMPIXELS = 1;
 constexpr size_t BUFFER_SIZE = 1024 * 1024 * 2; // 2 MB in PSRAM
 constexpr uint32_t SESSION_TTL_MS = 15UL * 60UL * 1000UL;
+constexpr uint32_t LOGIN_BLOCK_MS = 5UL * 60UL * 1000UL;
+constexpr uint32_t LOGIN_RESET_MS = 10UL * 60UL * 1000UL;
+constexpr uint8_t LOGIN_MAX_FAILURES = 5;
+constexpr uint8_t LOGIN_SLOT_COUNT = 12;
 constexpr const char *SETTINGS_FILE = "/settings.json";
 constexpr const char *SCRIPTS_DIR = "/scripts";
-
-// Key values used by the web keyboard shortcuts.
-constexpr uint8_t APP_KEY_ENTER = 176;
-constexpr uint8_t APP_KEY_ESC = 177;
-constexpr uint8_t APP_KEY_BACKSPACE = 178;
-constexpr uint8_t APP_KEY_TAB = 179;
-constexpr uint8_t APP_KEY_DELETE = 212;
-constexpr uint8_t APP_KEY_RIGHT = 215;
-constexpr uint8_t APP_KEY_LEFT = 216;
-constexpr uint8_t APP_KEY_DOWN = 217;
-constexpr uint8_t APP_KEY_UP = 218;
-constexpr uint8_t APP_KEY_GUI = 131;
 
 // --- USER SETTINGS (with defaults) ---
 String ap_ssid = "ESP32-Ducky-Pro";
@@ -41,6 +34,10 @@ String sta_pass = "";
 String admin_user = "admin";
 String admin_pass = "admin123";
 
+bool loginRateLimitEnabled = true;
+bool proxyAuthEnabled = false;
+String proxyAuthToken = "";
+
 int typeDelay = 6;
 int burstChars = 24;
 int burstPauseMs = 10;
@@ -49,6 +46,7 @@ int ledBrightness = 50;
 
 // --- RUNTIME OBJECTS ---
 USBHIDKeyboard Keyboard;
+USBHIDMouse Mouse;
 AsyncWebServer server(80);
 Adafruit_NeoPixel pixels(NUMPIXELS, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -64,12 +62,56 @@ String activeSessionToken = "";
 IPAddress activeSessionIp;
 uint32_t activeSessionLastSeen = 0;
 
+struct LoginAttemptSlot {
+  bool used = false;
+  IPAddress ip = IPAddress(0, 0, 0, 0);
+  uint8_t failures = 0;
+  uint32_t blockedUntil = 0;
+  uint32_t lastTouched = 0;
+};
+LoginAttemptSlot loginSlots[LOGIN_SLOT_COUNT];
+
 struct DuckyJob {
   size_t length;
   bool isRawText;
 };
 
 QueueHandle_t jobQueue = nullptr;
+
+enum class HidRealtimeType : uint8_t {
+  KeyTap,
+  KeyDown,
+  KeyUp,
+  KeyReleaseAll,
+  Combo,
+  MouseMove,
+  MouseButton,
+  MouseScroll,
+};
+
+enum : uint8_t {
+  MOUSE_ACTION_CLICK = 0,
+  MOUSE_ACTION_DOWN = 1,
+  MOUSE_ACTION_UP = 2,
+};
+
+struct HidRealtimeEvent {
+  HidRealtimeType type;
+  uint8_t keyCode;
+  bool ctrl;
+  bool alt;
+  bool shift;
+  bool gui;
+  int8_t dx;
+  int8_t dy;
+  int8_t wheel;
+  int8_t pan;
+  uint8_t mouseButton;
+  uint8_t mouseAction;
+  uint16_t holdMs;
+};
+
+QueueHandle_t hidEventQueue = nullptr;
 
 // --- HELPERS ---
 int clampInt(int value, int minimum, int maximum) {
@@ -78,9 +120,38 @@ int clampInt(int value, int minimum, int maximum) {
   return value;
 }
 
+int8_t clampInt8(int value, int minimum, int maximum) {
+  return static_cast<int8_t>(clampInt(value, minimum, maximum));
+}
+
 void setStatus(uint8_t r, uint8_t g, uint8_t b) {
   pixels.setPixelColor(0, pixels.Color(r, g, b));
   pixels.show();
+}
+
+bool isPrivateIPv4(const IPAddress &ip) {
+  if (ip[0] == 10) return true;
+  if (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) return true;
+  if (ip[0] == 192 && ip[1] == 168) return true;
+  if (ip[0] == 127) return true;
+  if (ip[0] == 169 && ip[1] == 254) return true;
+  return false;
+}
+
+IPAddress extractClientIp(AsyncWebServerRequest *request) {
+  if (request->hasHeader("X-Forwarded-For")) {
+    String forwarded = request->getHeader("X-Forwarded-For")->value();
+    int comma = forwarded.indexOf(',');
+    if (comma > 0) forwarded = forwarded.substring(0, comma);
+    forwarded.trim();
+
+    IPAddress parsed;
+    if (parsed.fromString(forwarded)) {
+      return parsed;
+    }
+  }
+
+  return request->client() ? request->client()->remoteIP() : IPAddress(0, 0, 0, 0);
 }
 
 void clearSession() {
@@ -121,17 +192,28 @@ String getCookieValue(AsyncWebServerRequest *request, const String &key) {
   return value;
 }
 
+String getBearerToken(AsyncWebServerRequest *request) {
+  if (!request->hasHeader("Authorization")) return "";
+
+  String auth = request->getHeader("Authorization")->value();
+  if (!auth.startsWith("Bearer ")) return "";
+
+  String token = auth.substring(7);
+  token.trim();
+  return token;
+}
+
 String generateSessionToken() {
-  char token[33];
-  for (int i = 0; i < 16; i++) {
+  char token[49];
+  for (int i = 0; i < 24; i++) {
     uint8_t rnd = static_cast<uint8_t>(esp_random() & 0xFF);
     sprintf(token + (i * 2), "%02x", rnd);
   }
-  token[32] = '\0';
+  token[48] = '\0';
   return String(token);
 }
 
-bool isAuthorized(AsyncWebServerRequest *request, bool refreshSession = true) {
+bool isSessionAuthorized(AsyncWebServerRequest *request, bool refreshSession = true) {
   if (activeSessionToken.isEmpty()) return false;
 
   if (isSessionExpired()) {
@@ -142,7 +224,7 @@ bool isAuthorized(AsyncWebServerRequest *request, bool refreshSession = true) {
   String sid = getCookieValue(request, "sid");
   if (sid.isEmpty() || sid != activeSessionToken) return false;
 
-  IPAddress remoteIp = request->client() ? request->client()->remoteIP() : IPAddress(0, 0, 0, 0);
+  IPAddress remoteIp = extractClientIp(request);
   if (remoteIp != activeSessionIp) return false;
 
   if (refreshSession) {
@@ -152,10 +234,152 @@ bool isAuthorized(AsyncWebServerRequest *request, bool refreshSession = true) {
   return true;
 }
 
+bool isProxyTokenAuthorized(AsyncWebServerRequest *request) {
+  if (!proxyAuthEnabled || proxyAuthToken.length() < 16) return false;
+
+  String token = "";
+  if (request->hasHeader("X-Proxy-Token")) {
+    token = request->getHeader("X-Proxy-Token")->value();
+  } else {
+    token = getBearerToken(request);
+  }
+
+  token.trim();
+  if (token.isEmpty() || token != proxyAuthToken) return false;
+
+  if (request->hasHeader("X-Forwarded-Proto")) {
+    String proto = request->getHeader("X-Forwarded-Proto")->value();
+    proto.toLowerCase();
+    proto.trim();
+    if (proto != "https") return false;
+  } else {
+    IPAddress remoteIp = request->client() ? request->client()->remoteIP() : IPAddress(0, 0, 0, 0);
+    if (!isPrivateIPv4(remoteIp)) return false;
+  }
+
+  return true;
+}
+
+bool hasAccess(AsyncWebServerRequest *request, bool refreshSession = true) {
+  if (isSessionAuthorized(request, refreshSession)) return true;
+  return isProxyTokenAuthorized(request);
+}
+
 bool requireAuth(AsyncWebServerRequest *request) {
-  if (isAuthorized(request)) return true;
+  if (hasAccess(request)) return true;
   request->send(401, "application/json", "{\"error\":\"unauthorized\"}");
   return false;
+}
+
+LoginAttemptSlot *findLoginSlot(const IPAddress &ip, bool createIfMissing) {
+  for (uint8_t i = 0; i < LOGIN_SLOT_COUNT; i++) {
+    if (loginSlots[i].used && loginSlots[i].ip == ip) {
+      return &loginSlots[i];
+    }
+  }
+
+  if (!createIfMissing) return nullptr;
+
+  int8_t emptyIndex = -1;
+  uint32_t oldest = UINT32_MAX;
+  int8_t oldestIndex = 0;
+
+  for (uint8_t i = 0; i < LOGIN_SLOT_COUNT; i++) {
+    if (!loginSlots[i].used) {
+      emptyIndex = static_cast<int8_t>(i);
+      break;
+    }
+
+    if (loginSlots[i].lastTouched < oldest) {
+      oldest = loginSlots[i].lastTouched;
+      oldestIndex = static_cast<int8_t>(i);
+    }
+  }
+
+  int8_t index = (emptyIndex >= 0) ? emptyIndex : oldestIndex;
+  loginSlots[index].used = true;
+  loginSlots[index].ip = ip;
+  loginSlots[index].failures = 0;
+  loginSlots[index].blockedUntil = 0;
+  loginSlots[index].lastTouched = millis();
+  return &loginSlots[index];
+}
+
+bool isLoginBlocked(const IPAddress &ip, uint32_t &retryMs) {
+  retryMs = 0;
+  if (!loginRateLimitEnabled) return false;
+
+  LoginAttemptSlot *slot = findLoginSlot(ip, false);
+  if (!slot) return false;
+
+  uint32_t now = millis();
+
+  if ((slot->blockedUntil != 0) && (static_cast<int32_t>(slot->blockedUntil - now) > 0)) {
+    retryMs = slot->blockedUntil - now;
+    return true;
+  }
+
+  if ((slot->blockedUntil != 0) && (static_cast<int32_t>(now - slot->blockedUntil) >= 0)) {
+    slot->blockedUntil = 0;
+    slot->failures = 0;
+  }
+
+  if (static_cast<int32_t>(now - slot->lastTouched) > static_cast<int32_t>(LOGIN_RESET_MS)) {
+    slot->failures = 0;
+  }
+
+  return false;
+}
+
+void recordLoginFailure(const IPAddress &ip) {
+  if (!loginRateLimitEnabled) return;
+
+  LoginAttemptSlot *slot = findLoginSlot(ip, true);
+  if (!slot) return;
+
+  uint32_t now = millis();
+
+  if (static_cast<int32_t>(now - slot->lastTouched) > static_cast<int32_t>(LOGIN_RESET_MS)) {
+    slot->failures = 0;
+    slot->blockedUntil = 0;
+  }
+
+  slot->failures++;
+  slot->lastTouched = now;
+
+  if (slot->failures >= LOGIN_MAX_FAILURES) {
+    slot->blockedUntil = now + LOGIN_BLOCK_MS;
+    slot->failures = 0;
+  }
+}
+
+void clearLoginFailures(const IPAddress &ip) {
+  LoginAttemptSlot *slot = findLoginSlot(ip, false);
+  if (!slot) return;
+
+  slot->failures = 0;
+  slot->blockedUntil = 0;
+  slot->lastTouched = millis();
+}
+
+void pruneLoginSlots() {
+  const uint32_t staleMs = 30UL * 60UL * 1000UL;
+  uint32_t now = millis();
+
+  for (uint8_t i = 0; i < LOGIN_SLOT_COUNT; i++) {
+    if (!loginSlots[i].used) continue;
+
+    bool expired = static_cast<int32_t>(now - loginSlots[i].lastTouched) > static_cast<int32_t>(staleMs);
+    bool notBlocked = (loginSlots[i].blockedUntil == 0) || (static_cast<int32_t>(now - loginSlots[i].blockedUntil) >= 0);
+
+    if (expired && notBlocked) {
+      loginSlots[i].used = false;
+      loginSlots[i].ip = IPAddress(0, 0, 0, 0);
+      loginSlots[i].failures = 0;
+      loginSlots[i].blockedUntil = 0;
+      loginSlots[i].lastTouched = 0;
+    }
+  }
 }
 
 String sanitizeScriptName(const String &rawName) {
@@ -191,13 +415,18 @@ bool ensureScriptDir() {
 }
 
 void persistSettings() {
-  DynamicJsonDocument out(1024);
+  DynamicJsonDocument out(1536);
   out["ap_ssid"] = ap_ssid;
   out["ap_pass"] = ap_pass;
   out["sta_ssid"] = sta_ssid;
   out["sta_pass"] = sta_pass;
   out["admin_user"] = admin_user;
   out["admin_pass"] = admin_pass;
+
+  out["login_rate_limit"] = loginRateLimitEnabled;
+  out["proxy_auth_enabled"] = proxyAuthEnabled;
+  out["proxy_auth_token"] = proxyAuthToken;
+
   out["delay"] = typeDelay;
   out["burst_chars"] = burstChars;
   out["burst_pause"] = burstPauseMs;
@@ -226,7 +455,7 @@ void loadSettings() {
     return;
   }
 
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(1536);
   DeserializationError err = deserializeJson(doc, file);
   file.close();
 
@@ -242,17 +471,24 @@ void loadSettings() {
   if (doc.containsKey("admin_user")) admin_user = doc["admin_user"].as<String>();
   if (doc.containsKey("admin_pass")) admin_pass = doc["admin_pass"].as<String>();
 
+  loginRateLimitEnabled = doc["login_rate_limit"] | loginRateLimitEnabled;
+  proxyAuthEnabled = doc["proxy_auth_enabled"] | proxyAuthEnabled;
+  if (doc.containsKey("proxy_auth_token")) proxyAuthToken = doc["proxy_auth_token"].as<String>();
+
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
   burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
   lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
   ledBrightness = clampInt(doc["bright"] | ledBrightness, 0, 255);
 
+  if (proxyAuthToken.length() > 128) proxyAuthToken = proxyAuthToken.substring(0, 128);
+  if (proxyAuthToken.length() < 16) proxyAuthEnabled = false;
+
   pixels.setBrightness(ledBrightness);
 }
 
 void applySettingsJson(const String &jsonBody) {
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(1536);
   DeserializationError err = deserializeJson(doc, jsonBody);
   if (err) return;
 
@@ -273,6 +509,24 @@ void applySettingsJson(const String &jsonBody) {
   if (doc.containsKey("admin_pass")) {
     String v = doc["admin_pass"].as<String>();
     if (v.length() >= 6 && v.length() <= 64) admin_pass = v;
+  }
+
+  if (doc.containsKey("login_rate_limit")) loginRateLimitEnabled = doc["login_rate_limit"].as<bool>();
+
+  if (doc.containsKey("proxy_auth_token")) {
+    String token = doc["proxy_auth_token"].as<String>();
+    token.trim();
+    if (token.isEmpty()) {
+      proxyAuthToken = "";
+      proxyAuthEnabled = false;
+    } else if (token.length() >= 16 && token.length() <= 128) {
+      proxyAuthToken = token;
+    }
+  }
+
+  if (doc.containsKey("proxy_auth_enabled")) {
+    bool enabled = doc["proxy_auth_enabled"].as<bool>();
+    proxyAuthEnabled = enabled && (proxyAuthToken.length() >= 16);
   }
 
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
@@ -300,6 +554,55 @@ void keyboardCombo(bool ctrl, bool alt, bool shift, bool gui, uint8_t keyCode, u
   Keyboard.press(keyCode);
   delay(holdMs);
   Keyboard.releaseAll();
+}
+
+bool queueHidEvent(const HidRealtimeEvent &event, TickType_t timeoutTicks = 0) {
+  if (!hidEventQueue) return false;
+  return xQueueSend(hidEventQueue, &event, timeoutTicks) == pdPASS;
+}
+
+void hidRealtimeTask(void *parameter) {
+  (void)parameter;
+
+  HidRealtimeEvent event;
+  for (;;) {
+    if (xQueueReceive(hidEventQueue, &event, portMAX_DELAY) != pdTRUE) continue;
+
+    switch (event.type) {
+      case HidRealtimeType::KeyTap:
+        keyboardTap(event.keyCode, event.holdMs);
+        break;
+      case HidRealtimeType::KeyDown:
+        Keyboard.press(event.keyCode);
+        break;
+      case HidRealtimeType::KeyUp:
+        Keyboard.release(event.keyCode);
+        break;
+      case HidRealtimeType::KeyReleaseAll:
+        Keyboard.releaseAll();
+        break;
+      case HidRealtimeType::Combo:
+        keyboardCombo(event.ctrl, event.alt, event.shift, event.gui, event.keyCode, event.holdMs);
+        break;
+      case HidRealtimeType::MouseMove:
+        Mouse.move(event.dx, event.dy, 0, 0);
+        break;
+      case HidRealtimeType::MouseScroll:
+        Mouse.move(0, 0, event.wheel, event.pan);
+        break;
+      case HidRealtimeType::MouseButton:
+        if (event.mouseAction == MOUSE_ACTION_DOWN) {
+          Mouse.press(event.mouseButton);
+        } else if (event.mouseAction == MOUSE_ACTION_UP) {
+          Mouse.release(event.mouseButton);
+        } else {
+          Mouse.click(event.mouseButton);
+        }
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 void typeTextInternal(size_t startIndex, size_t length) {
@@ -425,7 +728,7 @@ void parseAndExecuteInternal(size_t totalLength) {
           Keyboard.write(static_cast<uint8_t>(payload[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
-        keyboardTap(APP_KEY_ENTER);
+        keyboardTap(KEY_RETURN);
       }
     } else if (upper.startsWith("DELAY ")) {
       int d = trimmed.substring(6).toInt();
@@ -435,27 +738,27 @@ void parseAndExecuteInternal(size_t totalLength) {
     } else if (upper.startsWith("DEFAULTDELAY ")) {
       defaultDelay = clampInt(trimmed.substring(13).toInt(), 0, 5000);
     } else if (upper == "ENTER") {
-      keyboardTap(APP_KEY_ENTER);
+      keyboardTap(KEY_RETURN);
     } else if (upper == "TAB") {
-      keyboardTap(APP_KEY_TAB);
+      keyboardTap(KEY_TAB);
     } else if (upper == "ESC" || upper == "ESCAPE") {
-      keyboardTap(APP_KEY_ESC);
+      keyboardTap(KEY_ESC);
     } else if (upper == "BACKSPACE") {
-      keyboardTap(APP_KEY_BACKSPACE);
+      keyboardTap(KEY_BACKSPACE);
     } else if (upper == "DELETE" || upper == "DEL") {
-      keyboardTap(APP_KEY_DELETE);
+      keyboardTap(KEY_DELETE);
     } else if (upper == "UP" || upper == "UPARROW") {
-      keyboardTap(APP_KEY_UP);
+      keyboardTap(KEY_UP_ARROW);
     } else if (upper == "DOWN" || upper == "DOWNARROW") {
-      keyboardTap(APP_KEY_DOWN);
+      keyboardTap(KEY_DOWN_ARROW);
     } else if (upper == "LEFT" || upper == "LEFTARROW") {
-      keyboardTap(APP_KEY_LEFT);
+      keyboardTap(KEY_LEFT_ARROW);
     } else if (upper == "RIGHT" || upper == "RIGHTARROW") {
-      keyboardTap(APP_KEY_RIGHT);
+      keyboardTap(KEY_RIGHT_ARROW);
     } else if (upper == "SPACE") {
       Keyboard.write(' ');
     } else if (upper == "GUI" || upper == "WINDOWS") {
-      keyboardTap(APP_KEY_GUI, 80);
+      keyboardTap(KEY_LEFT_GUI, 80);
     } else if (upper.startsWith("GUI ") || upper.startsWith("WINDOWS ")) {
       char key = trimmed.charAt(trimmed.length() - 1);
       keyboardCombo(false, false, false, true, static_cast<uint8_t>(key));
@@ -492,7 +795,7 @@ bool queueJob(size_t length, bool isRawText) {
 }
 
 void duckyWorkerTask(void *parameter) {
-  (void) parameter;
+  (void)parameter;
 
   DuckyJob job;
   for (;;) {
@@ -525,6 +828,8 @@ String jsonStatus() {
   String json = "{";
   json += "\"busy\":" + String(isWorkerBusy ? "true" : "false");
   json += ",\"queued\":" + String(isJobQueued ? "true" : "false");
+  json += ",\"core_script\":1";
+  json += ",\"core_hid\":0";
   json += "}";
   return json;
 }
@@ -579,7 +884,7 @@ void handlePayloadUpload(
   constexpr uintptr_t STATE_REJECTED = 1;
   constexpr uintptr_t STATE_OVERFLOW = 2;
 
-  if (!isAuthorized(request)) return;
+  if (!hasAccess(request)) return;
 
   if (index == 0) {
     if (isWorkerBusy || isJobQueued || isInputLocked) {
@@ -638,6 +943,17 @@ void handlePayloadUpload(
   }
 }
 
+uint8_t parseMouseButton(const String &name) {
+  String lowered = name;
+  lowered.toLowerCase();
+  lowered.trim();
+
+  if (lowered == "left") return MOUSE_LEFT;
+  if (lowered == "right") return MOUSE_RIGHT;
+  if (lowered == "middle") return MOUSE_MIDDLE;
+  return 0;
+}
+
 void registerRoutes() {
   server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("max-age=300");
   server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("max-age=300");
@@ -648,7 +964,7 @@ void registerRoutes() {
       return;
     }
 
-    if (isAuthorized(request, false)) {
+    if (isSessionAuthorized(request, false)) {
       request->redirect("/app");
     } else {
       request->redirect("/login");
@@ -670,7 +986,7 @@ void registerRoutes() {
       return;
     }
 
-    if (!isAuthorized(request)) {
+    if (!isSessionAuthorized(request)) {
       request->redirect("/login");
       return;
     }
@@ -679,16 +995,23 @@ void registerRoutes() {
   });
 
   server.on("/api/login_status", HTTP_GET, [](AsyncWebServerRequest *request) {
-    bool loggedIn = isAuthorized(request, false);
+    bool loggedIn = isSessionAuthorized(request, false);
     bool locked = false;
+    uint32_t retryMs = 0;
+    IPAddress remoteIp = extractClientIp(request);
 
     if (!activeSessionToken.isEmpty() && !isSessionExpired() && !loggedIn) {
       locked = true;
     }
 
+    bool rateLimited = isLoginBlocked(remoteIp, retryMs);
+
     String json = "{";
     json += "\"loggedIn\":" + String(loggedIn ? "true" : "false");
     json += ",\"locked\":" + String(locked ? "true" : "false");
+    json += ",\"rate_limited\":" + String(rateLimited ? "true" : "false");
+    json += ",\"retry_after_ms\":" + String(retryMs);
+    json += ",\"proxy_auth_enabled\":" + String(proxyAuthEnabled ? "true" : "false");
     json += "}";
     request->send(200, "application/json", json);
   });
@@ -723,22 +1046,29 @@ void registerRoutes() {
           return;
         }
 
+        IPAddress remoteIp = extractClientIp(request);
+        uint32_t retryMs = 0;
+        if (isLoginBlocked(remoteIp, retryMs)) {
+          request->send(429, "application/json", "{\"error\":\"rate-limited\",\"retry_after_ms\":" + String(retryMs) + "}");
+          return;
+        }
+
         String user = doc["user"] | "";
         String pass = doc["pass"] | "";
 
         if (user != admin_user || pass != admin_pass) {
+          recordLoginFailure(remoteIp);
           request->send(401, "application/json", "{\"error\":\"invalid-credentials\"}");
           return;
         }
 
-        IPAddress remoteIp = request->client() ? request->client()->remoteIP() : IPAddress(0, 0, 0, 0);
         bool hasActiveSession = !activeSessionToken.isEmpty() && !isSessionExpired();
-
         if (hasActiveSession && remoteIp != activeSessionIp) {
           request->send(409, "application/json", "{\"error\":\"another-user-active\"}");
           return;
         }
 
+        clearLoginFailures(remoteIp);
         activeSessionToken = generateSessionToken();
         activeSessionIp = remoteIp;
         activeSessionLastSeen = millis();
@@ -762,6 +1092,18 @@ void registerRoutes() {
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     request->send(200, "application/json", jsonStatus());
+  });
+
+  server.on("/api/proxy_profile", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    String json = "{";
+    json += "\"proxy_auth_enabled\":" + String(proxyAuthEnabled ? "true" : "false");
+    json += ",\"token_configured\":" + String(proxyAuthToken.length() >= 16 ? "true" : "false");
+    json += ",\"required_header\":\"X-Proxy-Token\"";
+    json += ",\"https_forward_header\":\"X-Forwarded-Proto=https\"";
+    json += "}";
+    request->send(200, "application/json", json);
   });
 
   server.on("/api/stop", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -791,6 +1133,299 @@ void registerRoutes() {
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       handlePayloadUpload(request, data, len, index, total, true);
+    }
+  );
+
+  server.on(
+    "/api/kbd_event",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(384);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      String action = doc["action"] | "tap";
+      action.toLowerCase();
+
+      HidRealtimeEvent event = {};
+
+      if (action == "release_all") {
+        event.type = HidRealtimeType::KeyReleaseAll;
+      } else {
+        int code = doc["code"] | -1;
+        if (code < 0 || code > 255) {
+          request->send(400, "application/json", "{\"error\":\"invalid-key\"}");
+          return;
+        }
+
+        event.keyCode = static_cast<uint8_t>(code);
+        event.holdMs = clampInt(doc["hold"] | 30, 10, 300);
+
+        if (action == "down") {
+          event.type = HidRealtimeType::KeyDown;
+        } else if (action == "up") {
+          event.type = HidRealtimeType::KeyUp;
+        } else {
+          event.type = HidRealtimeType::KeyTap;
+        }
+      }
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/live_key",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(256);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      int code = doc["code"] | -1;
+      if (code < 0 || code > 255) {
+        request->send(400, "application/json", "{\"error\":\"invalid-key\"}");
+        return;
+      }
+
+      HidRealtimeEvent event = {};
+      event.type = HidRealtimeType::KeyTap;
+      event.keyCode = static_cast<uint8_t>(code);
+      event.holdMs = clampInt(doc["hold"] | 35, 10, 300);
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/live_combo",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(320);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      uint8_t keyCode = 0;
+      if (doc.containsKey("code")) {
+        int code = doc["code"] | -1;
+        if (code >= 0 && code <= 255) keyCode = static_cast<uint8_t>(code);
+      } else if (doc.containsKey("char")) {
+        String ch = doc["char"] | "";
+        if (!ch.isEmpty()) keyCode = static_cast<uint8_t>(ch[0]);
+      }
+
+      if (keyCode == 0) {
+        request->send(400, "application/json", "{\"error\":\"invalid-key\"}");
+        return;
+      }
+
+      HidRealtimeEvent event = {};
+      event.type = HidRealtimeType::Combo;
+      event.keyCode = keyCode;
+      event.ctrl = doc["ctrl"] | false;
+      event.alt = doc["alt"] | false;
+      event.shift = doc["shift"] | false;
+      event.gui = doc["gui"] | false;
+      event.holdMs = clampInt(doc["hold"] | 45, 10, 300);
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/mouse_move",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(256);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      int dx = doc["dx"] | 0;
+      int dy = doc["dy"] | 0;
+
+      HidRealtimeEvent event = {};
+      event.type = HidRealtimeType::MouseMove;
+      event.dx = clampInt8(dx, -50, 50);
+      event.dy = clampInt8(dy, -50, 50);
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/mouse_scroll",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(256);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      int wheel = doc["wheel"] | 0;
+      int pan = doc["pan"] | 0;
+
+      HidRealtimeEvent event = {};
+      event.type = HidRealtimeType::MouseScroll;
+      event.wheel = clampInt8(wheel, -20, 20);
+      event.pan = clampInt8(pan, -20, 20);
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/mouse_button",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(256);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      String buttonName = doc["button"] | "left";
+      String actionName = doc["action"] | "click";
+      actionName.toLowerCase();
+
+      uint8_t button = parseMouseButton(buttonName);
+      if (button == 0) {
+        request->send(400, "application/json", "{\"error\":\"invalid-button\"}");
+        return;
+      }
+
+      uint8_t action = MOUSE_ACTION_CLICK;
+      if (actionName == "down") action = MOUSE_ACTION_DOWN;
+      else if (actionName == "up") action = MOUSE_ACTION_UP;
+
+      HidRealtimeEvent event = {};
+      event.type = HidRealtimeType::MouseButton;
+      event.mouseButton = button;
+      event.mouseAction = action;
+
+      bool queued = queueHidEvent(event, pdMS_TO_TICKS(20));
+      if (!queued) {
+        request->send(503, "application/json", "{\"error\":\"hid-queue-full\"}");
+        return;
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
     }
   );
 
@@ -872,7 +1507,7 @@ void registerRoutes() {
       request->send(200, "application/json", "{\"saved\":true}");
     },
     [](AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
-      if (!isAuthorized(request)) return;
+      if (!hasAccess(request)) return;
 
       String safeName = sanitizeScriptName(filename);
       if (safeName.isEmpty()) return;
@@ -889,96 +1524,20 @@ void registerRoutes() {
     }
   );
 
-  server.on(
-    "/api/live_key",
-    HTTP_POST,
-    [](AsyncWebServerRequest *request) {
-      if (!requireAuth(request)) return;
-    },
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!isAuthorized(request)) return;
-      if (index + len != total) return;
-
-      if (isWorkerBusy || isJobQueued) {
-        request->send(503, "application/json", "{\"error\":\"busy\"}");
-        return;
-      }
-
-      DynamicJsonDocument doc(256);
-      DeserializationError err = deserializeJson(doc, data, len);
-      if (err) {
-        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
-        return;
-      }
-
-      int code = doc["code"] | -1;
-      if (code < 0 || code > 255) {
-        request->send(400, "application/json", "{\"error\":\"invalid-key\"}");
-        return;
-      }
-
-      keyboardTap(static_cast<uint8_t>(code), 40);
-      request->send(200, "application/json", "{\"ok\":true}");
-    }
-  );
-
-  server.on(
-    "/api/live_combo",
-    HTTP_POST,
-    [](AsyncWebServerRequest *request) {
-      if (!requireAuth(request)) return;
-    },
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!isAuthorized(request)) return;
-      if (index + len != total) return;
-
-      if (isWorkerBusy || isJobQueued) {
-        request->send(503, "application/json", "{\"error\":\"busy\"}");
-        return;
-      }
-
-      DynamicJsonDocument doc(256);
-      DeserializationError err = deserializeJson(doc, data, len);
-      if (err) {
-        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
-        return;
-      }
-
-      bool ctrl = doc["ctrl"] | false;
-      bool alt = doc["alt"] | false;
-      bool shift = doc["shift"] | false;
-      bool gui = doc["gui"] | false;
-
-      uint8_t keyCode = 0;
-      if (doc.containsKey("code")) {
-        int code = doc["code"] | -1;
-        if (code >= 0 && code <= 255) keyCode = static_cast<uint8_t>(code);
-      } else {
-        String ch = doc["char"] | "";
-        if (!ch.isEmpty()) keyCode = static_cast<uint8_t>(ch[0]);
-      }
-
-      if (keyCode == 0) {
-        request->send(400, "application/json", "{\"error\":\"invalid-key\"}");
-        return;
-      }
-
-      keyboardCombo(ctrl, alt, shift, gui, keyCode, 45);
-      request->send(200, "application/json", "{\"ok\":true}");
-    }
-  );
-
   server.on("/api/get_settings", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
 
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(1536);
     doc["ap_ssid"] = ap_ssid;
     doc["ap_pass"] = ap_pass;
     doc["sta_ssid"] = sta_ssid;
     doc["sta_pass"] = sta_pass;
     doc["admin_user"] = admin_user;
+
+    doc["login_rate_limit"] = loginRateLimitEnabled;
+    doc["proxy_auth_enabled"] = proxyAuthEnabled;
+    doc["proxy_auth_token"] = proxyAuthToken;
+
     doc["delay"] = typeDelay;
     doc["burst_chars"] = burstChars;
     doc["burst_pause"] = burstPauseMs;
@@ -998,7 +1557,7 @@ void registerRoutes() {
     },
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!isAuthorized(request)) return;
+      if (!hasAccess(request)) return;
 
       if (index == 0) request->_tempObject = new String();
       String *body = reinterpret_cast<String *>(request->_tempObject);
@@ -1059,15 +1618,18 @@ void setup() {
 
   USB.begin();
   Keyboard.begin();
+  Mouse.begin();
 
   jobQueue = xQueueCreate(1, sizeof(DuckyJob));
-  if (!jobQueue) {
+  hidEventQueue = xQueueCreate(48, sizeof(HidRealtimeEvent));
+  if (!jobQueue || !hidEventQueue) {
     Serial.println("Queue creation failed");
     setStatus(255, 0, 0);
     while (true) delay(1000);
   }
 
   xTaskCreatePinnedToCore(duckyWorkerTask, "DuckyWorker", 16384, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(hidRealtimeTask, "HidRealtime", 8192, nullptr, 2, nullptr, 0);
 
   connectWiFi();
   registerRoutes();
@@ -1078,8 +1640,17 @@ void setup() {
 }
 
 void loop() {
+  static uint32_t lastPrune = 0;
+
   if (!activeSessionToken.isEmpty() && isSessionExpired()) {
     clearSession();
   }
+
+  uint32_t now = millis();
+  if (now - lastPrune > 30000) {
+    pruneLoginSlots();
+    lastPrune = now;
+  }
+
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
