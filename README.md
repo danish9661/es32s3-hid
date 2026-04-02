@@ -155,6 +155,11 @@ Live control:
 KVM bridge:
 - `GET /api/kvm_status`
 - `POST /api/kvm_config`
+- `GET /api/kvm_bridge_record_status`
+- `POST /api/kvm_bridge_record_start`
+- `POST /api/kvm_bridge_record_stop`
+- `POST /api/kvm_bridge_record_clear`
+- `GET /api/kvm_bridge_record_export`
 
 Action files:
 - `GET /api/action_files`
@@ -183,6 +188,7 @@ You can configure:
 - Enable/disable listener
 - UDP port (default `4210`)
 - Optional allowed source IP filter
+- KVM mouse smoothness in settings (`kvm_mouse_smooth`, 25-250%)
 
 ### Host server launch (updated)
 
@@ -192,6 +198,18 @@ Examples:
 
 ```bash
 python server/server.py --host 192.168.4.1 --port 4210 --toggle-key f8
+```
+
+Shared mode (recommended, host input remains usable while KVM is ON):
+
+```bash
+python server/server.py --host 192.168.4.1 --port 4210 --toggle-key f8 --no-preview
+```
+
+Exclusive mode (old behavior, blocks host keyboard/mouse while KVM is ON):
+
+```bash
+python server/server.py --host 192.168.4.1 --port 4210 --toggle-key f8 --no-preview --block-local-input
 ```
 
 With screenshot preview service:
@@ -211,9 +229,22 @@ Supported `--toggle-key` values:
 Preview endpoint (host side):
 - `http://127.0.0.1:9876/screenshot.bmp`
 
+Target screenshot helper (run on target machine):
+
+```bash
+python server/target_screenshot_server.py --port 9988
+```
+
+Target screenshot endpoint example:
+- `http://<TARGET_IP>:9988/screenshot.bmp`
+
 ## Action Recording / Replay File
 
-The KVM tab can record keyboard and mouse actions sent from the web UI, save them as files on ESP (`/actions`), and replay them later.
+The KVM tab can record keyboard and mouse actions from either:
+- Web UI actions
+- Incoming KVM bridge packets
+
+Recordings can be saved as files on ESP (`/actions`) and replayed later.
 
 Replay file format is line-based:
 - `delay_ms|key_tap|code|hold`
@@ -224,6 +255,7 @@ Replay file format is line-based:
 - `delay_ms|mouse_move|dx|dy`
 - `delay_ms|mouse_scroll|wheel|pan`
 - `delay_ms|mouse_button|button|action`
+- `delay_ms|consumer|usage_id`
 
 Where combo `flags` bitmask is:
 - `1`: Ctrl

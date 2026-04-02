@@ -45,6 +45,11 @@ def main():
                         help="HTTP screenshot preview port (default: 9876)")
     parser.add_argument("--no-preview", action="store_true",
                         help="Disable HTTP screenshot preview server")
+    parser.add_argument(
+        "--block-local-input",
+        action="store_true",
+        help="Consume host keyboard/mouse input while KVM is ON (exclusive mode)",
+    )
     args = parser.parse_args()
 
     if not (60 <= args.rate <= 1000):
@@ -81,7 +86,12 @@ def main():
     sender.start()
 
     print("[INIT] Installing WinAPI hooks...")
-    hook_manager = InputHookManager(state, toggle_vk=toggle_vk, toggle_label=toggle_label)
+    hook_manager = InputHookManager(
+        state,
+        toggle_vk=toggle_vk,
+        toggle_label=toggle_label,
+        block_local_input=args.block_local_input,
+    )
     try:
         hook_manager.start()
     except Exception as e:
@@ -91,6 +101,10 @@ def main():
 
     print(f"[KVM] Press {toggle_label} to toggle KVM mode")
     print("[KVM] OFF (input goes to Host PC)")
+    if args.block_local_input:
+        print("[KVM] Exclusive mode enabled (host input is blocked while KVM is ON)")
+    else:
+        print("[KVM] Shared mode enabled (host input remains usable while KVM is ON)")
 
     try:
         hook_manager.process_messages()

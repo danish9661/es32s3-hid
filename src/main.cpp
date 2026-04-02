@@ -102,6 +102,7 @@ int burstChars = 24;
 int burstPauseMs = 10;
 int lineDelayMs = 40;
 int ledBrightness = 50;
+int kvmMouseSmoothness = 100;
 
 // --- RUNTIME OBJECTS ---
 USBHIDKeyboard Keyboard;
@@ -203,6 +204,30 @@ uint32_t kvmPacketsDropped = 0;
 uint32_t kvmPacketsEnqueued = 0;
 uint32_t kvmLastPacketMs = 0;
 bool kvmHasSequence = false;
+String kvmBindError = "";
+SemaphoreHandle_t kvmUdpMutex = nullptr;
+
+constexpr size_t KVM_BRIDGE_RECORD_MAX_EVENTS = 3000;
+
+struct KvmBridgeRecordEvent {
+  uint32_t dtMs;
+  uint8_t type;
+  uint8_t buttons;
+  int16_t dx;
+  int16_t dy;
+  int8_t wheel;
+  int8_t pan;
+  uint8_t modifiers;
+  uint8_t keys[6];
+  uint16_t usageId;
+};
+
+KvmBridgeRecordEvent kvmBridgeRecordEvents[KVM_BRIDGE_RECORD_MAX_EVENTS];
+size_t kvmBridgeRecordCount = 0;
+uint32_t kvmBridgeRecordDropped = 0;
+uint32_t kvmBridgeRecordStartMs = 0;
+bool kvmBridgeRecordEnabled = false;
+SemaphoreHandle_t kvmBridgeRecordMutex = nullptr;
 
 // --- HELPERS ---
 int clampInt(int value, int minimum, int maximum) {
@@ -213,6 +238,19 @@ int clampInt(int value, int minimum, int maximum) {
 
 int8_t clampInt8(int value, int minimum, int maximum) {
   return static_cast<int8_t>(clampInt(value, minimum, maximum));
+}
+
+int16_t scaleMouseDelta(int16_t value, int percent) {
+  long scaled = static_cast<long>(value) * static_cast<long>(percent);
+  if (scaled >= 0) {
+    scaled = (scaled + 50) / 100;
+  } else {
+    scaled = (scaled - 50) / 100;
+  }
+
+  if (scaled > 32767) scaled = 32767;
+  if (scaled < -32768) scaled = -32768;
+  return static_cast<int16_t>(scaled);
 }
 
 bool parseUint16String(const String &raw, uint16_t &out) {
@@ -288,6 +326,55 @@ String normalizeOptionalIp(const String &raw) {
 }
 
 void updateKvmUdpBinding();
+
+void resetKvmBridgeRecordingLocked(uint32_t nowMs) {
+  kvmBridgeRecordCount = 0;
+  kvmBridgeRecordDropped = 0;
+  kvmBridgeRecordStartMs = nowMs;
+}
+
+void captureKvmBridgeEvent(const KvmPacket &packet, uint32_t nowMs) {
+  if (!kvmBridgeRecordMutex) return;
+  if (xSemaphoreTake(kvmBridgeRecordMutex, 0) != pdTRUE) return;
+
+  if (!kvmBridgeRecordEnabled) {
+    xSemaphoreGive(kvmBridgeRecordMutex);
+    return;
+  }
+
+  if (kvmBridgeRecordCount >= KVM_BRIDGE_RECORD_MAX_EVENTS) {
+    kvmBridgeRecordDropped++;
+    xSemaphoreGive(kvmBridgeRecordMutex);
+    return;
+  }
+
+  KvmBridgeRecordEvent &record = kvmBridgeRecordEvents[kvmBridgeRecordCount++];
+  record.dtMs = nowMs - kvmBridgeRecordStartMs;
+  record.type = packet.type;
+  record.buttons = 0;
+  record.dx = 0;
+  record.dy = 0;
+  record.wheel = 0;
+  record.pan = 0;
+  record.modifiers = 0;
+  memset(record.keys, 0, sizeof(record.keys));
+  record.usageId = 0;
+
+  if (packet.type == KVM_EVENT_MOUSE) {
+    record.buttons = packet.payload.mouse.buttons & MOUSE_ALL;
+    record.dx = packet.payload.mouse.dx;
+    record.dy = packet.payload.mouse.dy;
+    record.wheel = packet.payload.mouse.wheel;
+    record.pan = packet.payload.mouse.pan;
+  } else if (packet.type == KVM_EVENT_KEYBOARD) {
+    record.modifiers = packet.payload.keyboard.modifiers;
+    memcpy(record.keys, packet.payload.keyboard.keycodes, sizeof(record.keys));
+  } else if (packet.type == KVM_EVENT_CONSUMER) {
+    record.usageId = packet.payload.consumer.usageId;
+  }
+
+  xSemaphoreGive(kvmBridgeRecordMutex);
+}
 
 IPAddress extractClientIp(AsyncWebServerRequest *request) {
   if (request->hasHeader("X-Forwarded-For")) {
@@ -624,6 +711,7 @@ void persistSettings() {
   out["burst_pause"] = burstPauseMs;
   out["line_delay"] = lineDelayMs;
   out["bright"] = ledBrightness;
+  out["kvm_mouse_smooth"] = kvmMouseSmoothness;
 
   File file = LittleFS.open(SETTINGS_FILE, "w");
   if (!file) {
@@ -695,6 +783,7 @@ void loadSettings() {
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
   lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
   ledBrightness = clampInt(doc["bright"] | ledBrightness, 0, 255);
+  kvmMouseSmoothness = clampInt(doc["kvm_mouse_smooth"] | kvmMouseSmoothness, 25, 250);
 
   if (proxyAuthToken.length() > 128) proxyAuthToken = proxyAuthToken.substring(0, 128);
   if (proxyAuthToken.length() < 16) proxyAuthEnabled = false;
@@ -789,6 +878,7 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
   lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
   ledBrightness = clampInt(doc["bright"] | ledBrightness, 0, 255);
+  kvmMouseSmoothness = clampInt(doc["kvm_mouse_smooth"] | kvmMouseSmoothness, 25, 250);
 
   pixels.setBrightness(ledBrightness);
   persistSettings();
@@ -903,8 +993,9 @@ void hidRealtimeTask(void *parameter) {
           kvmButtons = event.kvmButtons;
         }
 
-        int16_t dx = event.kvmDx;
-        int16_t dy = event.kvmDy;
+        int smoothPercent = clampInt(kvmMouseSmoothness, 25, 250);
+        int16_t dx = scaleMouseDelta(event.kvmDx, smoothPercent);
+        int16_t dy = scaleMouseDelta(event.kvmDy, smoothPercent);
 
         while (dx != 0 || dy != 0) {
           int8_t stepX = clampInt8(dx, -120, 120);
@@ -1354,6 +1445,9 @@ bool isKvmSourceAllowed(const IPAddress &ip) {
 }
 
 void updateKvmUdpBinding() {
+  if (!kvmUdpMutex) return;
+  if (xSemaphoreTake(kvmUdpMutex, pdMS_TO_TICKS(150)) != pdTRUE) return;
+
   if (!kvmEnabled) {
     if (kvmUdpBound) {
       kvmUdp.stop();
@@ -1361,24 +1455,37 @@ void updateKvmUdpBinding() {
       kvmBoundPort = 0;
       kvmHasSequence = false;
     }
+    kvmBindError = "";
+    xSemaphoreGive(kvmUdpMutex);
     return;
   }
 
   uint16_t desiredPort = static_cast<uint16_t>(clampInt(kvmPort, 1, 65535));
-  if (kvmUdpBound && kvmBoundPort == desiredPort) return;
+  if (kvmUdpBound && kvmBoundPort == desiredPort) {
+    kvmBindError = "";
+    xSemaphoreGive(kvmUdpMutex);
+    return;
+  }
 
   if (kvmUdpBound) {
     kvmUdp.stop();
     kvmUdpBound = false;
     kvmBoundPort = 0;
-    delay(5);
   }
 
-  kvmUdpBound = kvmUdp.begin(desiredPort);
-  if (kvmUdpBound) {
+  bool bound = kvmUdp.begin(desiredPort);
+  kvmUdpBound = bound;
+
+  if (bound) {
     kvmBoundPort = desiredPort;
     kvmHasSequence = false;
+    kvmBindError = "";
+  } else {
+    kvmBoundPort = 0;
+    kvmBindError = "udp-begin-failed";
   }
+
+  xSemaphoreGive(kvmUdpMutex);
 }
 
 void kvmNetworkTask(void *parameter) {
@@ -1387,27 +1494,44 @@ void kvmNetworkTask(void *parameter) {
   uint8_t packetBuffer[KVM_PACKET_SIZE];
 
   for (;;) {
-    if (!kvmEnabled) {
+    bool enabled = false;
+    bool bound = false;
+    int packetSize = 0;
+    int bytesRead = 0;
+    IPAddress sourceIp = IPAddress(0, 0, 0, 0);
+
+    if (kvmUdpMutex && xSemaphoreTake(kvmUdpMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      enabled = kvmEnabled;
+      bound = kvmUdpBound;
+
+      if (enabled && bound) {
+        packetSize = kvmUdp.parsePacket();
+        if (packetSize > 0) {
+          sourceIp = kvmUdp.remoteIP();
+          bytesRead = kvmUdp.read(packetBuffer, KVM_PACKET_SIZE);
+          while (kvmUdp.available() > 0) {
+            kvmUdp.read();
+          }
+        }
+      }
+
+      xSemaphoreGive(kvmUdpMutex);
+    }
+
+    if (!enabled) {
       vTaskDelay(pdMS_TO_TICKS(120));
       continue;
     }
 
-    if (!kvmUdpBound) {
+    if (!bound) {
       updateKvmUdpBinding();
       vTaskDelay(pdMS_TO_TICKS(80));
       continue;
     }
 
-    int packetSize = kvmUdp.parsePacket();
     if (packetSize <= 0) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
-    }
-
-    IPAddress sourceIp = kvmUdp.remoteIP();
-    int bytesRead = kvmUdp.read(packetBuffer, KVM_PACKET_SIZE);
-    while (kvmUdp.available() > 0) {
-      kvmUdp.read();
     }
 
     if (packetSize != static_cast<int>(KVM_PACKET_SIZE) || bytesRead != static_cast<int>(KVM_PACKET_SIZE)) {
@@ -1436,11 +1560,14 @@ void kvmNetworkTask(void *parameter) {
       }
     }
 
+    uint32_t nowMs = millis();
     kvmHasSequence = true;
     kvmLastSequence = packet.sequence;
     kvmLastSourceIp = sourceIp;
-    kvmLastPacketMs = millis();
+    kvmLastPacketMs = nowMs;
     kvmPacketsRx++;
+
+    captureKvmBridgeEvent(packet, nowMs);
 
     if (isWorkerBusy || isJobQueued) {
       kvmPacketsDropped++;
@@ -1774,16 +1901,49 @@ void registerRoutes() {
   server.on("/api/kvm_status", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
 
+    bool enabled = kvmEnabled;
+    bool bound = kvmUdpBound;
+    uint16_t configuredPort = kvmPort;
+    uint16_t boundPort = kvmBoundPort;
+    String allowedIp = kvmAllowedIp;
+    String bindError = kvmBindError;
+    uint32_t packetsRx = kvmPacketsRx;
+    uint32_t packetsDropped = kvmPacketsDropped;
+    uint32_t packetsEnqueued = kvmPacketsEnqueued;
+    uint32_t lastSequence = kvmHasSequence ? kvmLastSequence : 0;
+    IPAddress lastSourceIp = kvmLastSourceIp;
+    uint32_t lastPacketMs = kvmLastPacketMs;
+
+    if (kvmUdpMutex && xSemaphoreTake(kvmUdpMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      enabled = kvmEnabled;
+      bound = kvmUdpBound;
+      configuredPort = kvmPort;
+      boundPort = kvmBoundPort;
+      allowedIp = kvmAllowedIp;
+      bindError = kvmBindError;
+      packetsRx = kvmPacketsRx;
+      packetsDropped = kvmPacketsDropped;
+      packetsEnqueued = kvmPacketsEnqueued;
+      lastSequence = kvmHasSequence ? kvmLastSequence : 0;
+      lastSourceIp = kvmLastSourceIp;
+      lastPacketMs = kvmLastPacketMs;
+      xSemaphoreGive(kvmUdpMutex);
+    }
+
     String deviceIp = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     uint32_t now = millis();
-    uint32_t packetAgeMs = (kvmLastPacketMs == 0) ? 0xFFFFFFFF : (now - kvmLastPacketMs);
+    uint32_t packetAgeMs = (lastPacketMs == 0) ? 0xFFFFFFFF : (now - lastPacketMs);
 
     String linkState = "disabled";
     bool connected = false;
-    if (kvmEnabled) {
-      if (!kvmUdpBound) {
-        linkState = "not-bound";
-      } else if (kvmLastPacketMs == 0) {
+    if (enabled) {
+      if (!bound) {
+        if (!bindError.isEmpty()) {
+          linkState = "bind-failed";
+        } else {
+          linkState = "not-bound";
+        }
+      } else if (lastPacketMs == 0) {
         linkState = "waiting";
       } else if (packetAgeMs < 2500) {
         linkState = "connected";
@@ -1794,18 +1954,20 @@ void registerRoutes() {
     }
 
     String json = "{";
-    json += "\"enabled\":" + String(kvmEnabled ? "true" : "false");
-    json += ",\"bound\":" + String(kvmUdpBound ? "true" : "false");
+    json += "\"enabled\":" + String(enabled ? "true" : "false");
+    json += ",\"bound\":" + String(bound ? "true" : "false");
     json += ",\"connected\":" + String(connected ? "true" : "false");
     json += ",\"link_state\":\"" + linkState + "\"";
-    json += ",\"port\":" + String(kvmPort);
-    json += ",\"allowed_ip\":\"" + kvmAllowedIp + "\"";
-    json += ",\"packets_rx\":" + String(kvmPacketsRx);
-    json += ",\"packets_dropped\":" + String(kvmPacketsDropped);
-    json += ",\"packets_enqueued\":" + String(kvmPacketsEnqueued);
-    json += ",\"last_sequence\":" + String(kvmHasSequence ? kvmLastSequence : 0);
-    json += ",\"last_source_ip\":\"" + kvmLastSourceIp.toString() + "\"";
-    json += ",\"last_packet_ms\":" + String(kvmLastPacketMs);
+    json += ",\"port\":" + String(configuredPort);
+    json += ",\"bound_port\":" + String(boundPort);
+    json += ",\"allowed_ip\":\"" + allowedIp + "\"";
+    json += ",\"bind_error\":\"" + bindError + "\"";
+    json += ",\"packets_rx\":" + String(packetsRx);
+    json += ",\"packets_dropped\":" + String(packetsDropped);
+    json += ",\"packets_enqueued\":" + String(packetsEnqueued);
+    json += ",\"last_sequence\":" + String(lastSequence);
+    json += ",\"last_source_ip\":\"" + lastSourceIp.toString() + "\"";
+    json += ",\"last_packet_ms\":" + String(lastPacketMs);
     json += ",\"packet_age_ms\":" + String(packetAgeMs);
     json += ",\"device_ip\":\"" + deviceIp + "\"";
     json += "}";
@@ -1864,10 +2026,183 @@ void registerRoutes() {
         persistSettings();
         updateKvmUdpBinding();
 
-        request->send(200, "application/json", "{\"saved\":true}");
+        bool bound = kvmUdpBound;
+        uint16_t boundPort = kvmBoundPort;
+        String bindError = kvmBindError;
+        if (kvmUdpMutex && xSemaphoreTake(kvmUdpMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+          bound = kvmUdpBound;
+          boundPort = kvmBoundPort;
+          bindError = kvmBindError;
+          xSemaphoreGive(kvmUdpMutex);
+        }
+
+        String json = "{";
+        json += "\"saved\":true";
+        json += ",\"bound\":" + String(bound ? "true" : "false");
+        json += ",\"bound_port\":" + String(boundPort);
+        json += ",\"bind_error\":\"" + bindError + "\"";
+        json += "}";
+
+        request->send(200, "application/json", json);
       }
     }
   );
+
+  server.on("/api/kvm_bridge_record_status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    bool enabled = false;
+    size_t count = 0;
+    uint32_t dropped = 0;
+    uint32_t durationMs = 0;
+
+    if (kvmBridgeRecordMutex && xSemaphoreTake(kvmBridgeRecordMutex, pdMS_TO_TICKS(40)) == pdTRUE) {
+      enabled = kvmBridgeRecordEnabled;
+      count = kvmBridgeRecordCount;
+      dropped = kvmBridgeRecordDropped;
+      if (enabled) {
+        durationMs = millis() - kvmBridgeRecordStartMs;
+      } else if (count > 0) {
+        durationMs = kvmBridgeRecordEvents[count - 1].dtMs;
+      }
+      xSemaphoreGive(kvmBridgeRecordMutex);
+    }
+
+    String json = "{";
+    json += "\"enabled\":" + String(enabled ? "true" : "false");
+    json += ",\"count\":" + String(static_cast<uint32_t>(count));
+    json += ",\"dropped\":" + String(dropped);
+    json += ",\"capacity\":" + String(static_cast<uint32_t>(KVM_BRIDGE_RECORD_MAX_EVENTS));
+    json += ",\"duration_ms\":" + String(durationMs);
+    json += "}";
+
+    request->send(200, "application/json", json);
+  });
+
+  server.on("/api/kvm_bridge_record_start", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (!hasAccess(request)) return;
+
+    if (kvmBridgeRecordMutex && xSemaphoreTake(kvmBridgeRecordMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      kvmBridgeRecordEnabled = true;
+      resetKvmBridgeRecordingLocked(millis());
+      xSemaphoreGive(kvmBridgeRecordMutex);
+    }
+
+    request->send(200, "application/json", "{\"started\":true}");
+  });
+
+  server.on("/api/kvm_bridge_record_stop", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (!hasAccess(request)) return;
+
+    if (kvmBridgeRecordMutex && xSemaphoreTake(kvmBridgeRecordMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      kvmBridgeRecordEnabled = false;
+      xSemaphoreGive(kvmBridgeRecordMutex);
+    }
+
+    request->send(200, "application/json", "{\"stopped\":true}");
+  });
+
+  server.on("/api/kvm_bridge_record_clear", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (!hasAccess(request)) return;
+
+    if (kvmBridgeRecordMutex && xSemaphoreTake(kvmBridgeRecordMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      resetKvmBridgeRecordingLocked(millis());
+      xSemaphoreGive(kvmBridgeRecordMutex);
+    }
+
+    request->send(200, "application/json", "{\"cleared\":true}");
+  });
+
+  server.on("/api/kvm_bridge_record_export", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    bool enabled = false;
+    size_t count = 0;
+    uint32_t dropped = 0;
+    KvmBridgeRecordEvent *snapshot = nullptr;
+
+    if (kvmBridgeRecordMutex && xSemaphoreTake(kvmBridgeRecordMutex, pdMS_TO_TICKS(120)) == pdTRUE) {
+      enabled = kvmBridgeRecordEnabled;
+      count = kvmBridgeRecordCount;
+      dropped = kvmBridgeRecordDropped;
+
+      if (count > 0) {
+        size_t bytes = sizeof(KvmBridgeRecordEvent) * count;
+        snapshot = static_cast<KvmBridgeRecordEvent *>(malloc(bytes));
+        if (snapshot) {
+          memcpy(snapshot, kvmBridgeRecordEvents, bytes);
+        }
+      }
+
+      xSemaphoreGive(kvmBridgeRecordMutex);
+    }
+
+    if (count > 0 && !snapshot) {
+      request->send(503, "application/json", "{\"error\":\"snapshot-failed\"}");
+      return;
+    }
+
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    response->print("{\"enabled\":");
+    response->print(enabled ? "true" : "false");
+    response->print(",\"dropped\":");
+    response->print(String(dropped));
+    response->print(",\"count\":");
+    response->print(String(static_cast<uint32_t>(count)));
+    response->print(",\"events\":[");
+
+    for (size_t i = 0; i < count; i++) {
+      const KvmBridgeRecordEvent &ev = snapshot[i];
+      if (i > 0) response->print(",");
+
+      if (ev.type == KVM_EVENT_MOUSE) {
+        response->print("{\"type\":\"mouse\",\"dt\":");
+        response->print(String(ev.dtMs));
+        response->print(",\"buttons\":");
+        response->print(String(ev.buttons));
+        response->print(",\"dx\":");
+        response->print(String(ev.dx));
+        response->print(",\"dy\":");
+        response->print(String(ev.dy));
+        response->print(",\"wheel\":");
+        response->print(String(ev.wheel));
+        response->print(",\"pan\":");
+        response->print(String(ev.pan));
+        response->print("}");
+      } else if (ev.type == KVM_EVENT_KEYBOARD) {
+        response->print("{\"type\":\"keyboard\",\"dt\":");
+        response->print(String(ev.dtMs));
+        response->print(",\"modifiers\":");
+        response->print(String(ev.modifiers));
+        response->print(",\"keys\":[");
+        for (size_t k = 0; k < 6; k++) {
+          if (k > 0) response->print(",");
+          response->print(String(ev.keys[k]));
+        }
+        response->print("]}");
+      } else if (ev.type == KVM_EVENT_CONSUMER) {
+        response->print("{\"type\":\"consumer\",\"dt\":");
+        response->print(String(ev.dtMs));
+        response->print(",\"usage\":");
+        response->print(String(ev.usageId));
+        response->print("}");
+      } else {
+        response->print("{\"type\":\"unknown\",\"dt\":");
+        response->print(String(ev.dtMs));
+        response->print("}");
+      }
+    }
+
+    response->print("]}");
+    request->send(response);
+
+    if (snapshot) {
+      free(snapshot);
+    }
+  });
 
   server.on("/api/proxy_profile", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
@@ -2483,6 +2818,7 @@ void registerRoutes() {
     doc["burst_pause"] = burstPauseMs;
     doc["line_delay"] = lineDelayMs;
     doc["bright"] = ledBrightness;
+    doc["kvm_mouse_smooth"] = kvmMouseSmoothness;
 
     String json;
     serializeJson(doc, json);
@@ -2583,6 +2919,14 @@ void setup() {
   hidEventQueue = xQueueCreate(64, sizeof(HidRealtimeEvent));
   if (!jobQueue || !hidEventQueue) {
     Serial.println("Queue creation failed");
+    setStatus(255, 0, 0);
+    while (true) delay(1000);
+  }
+
+  kvmUdpMutex = xSemaphoreCreateMutex();
+  kvmBridgeRecordMutex = xSemaphoreCreateMutex();
+  if (!kvmUdpMutex || !kvmBridgeRecordMutex) {
+    Serial.println("Mutex creation failed");
     setStatus(255, 0, 0);
     while (true) delay(1000);
   }

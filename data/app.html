@@ -154,22 +154,26 @@
           <p class="small">Use these ready commands on your host computer. Copy and run from project root.</p>
 
           <div class="helper-grid">
-            <label class="label" for="kvm-cmd-main">Main command (with screenshot preview)</label>
+            <label class="label" for="kvm-cmd-main">Shared mode command (host input stays usable)</label>
             <textarea id="kvm-cmd-main" rows="2" readonly></textarea>
             <button id="copy-kvm-cmd-main" class="btn-outline">Copy Main Command</button>
 
-            <label class="label" for="kvm-cmd-no-preview">Low-overhead command (no preview server)</label>
+            <label class="label" for="kvm-cmd-no-preview">Exclusive mode command (block host input while KVM ON)</label>
             <textarea id="kvm-cmd-no-preview" rows="2" readonly></textarea>
-            <button id="copy-kvm-cmd-no-preview" class="btn-outline">Copy No-Preview Command</button>
+            <button id="copy-kvm-cmd-no-preview" class="btn-outline">Copy Exclusive Command</button>
+
+            <label class="label" for="target-capture-cmd">Target screenshot agent command (run on target PC)</label>
+            <textarea id="target-capture-cmd" rows="2" readonly></textarea>
+            <button id="copy-target-capture-cmd" class="btn-outline">Copy Target Capture Command</button>
           </div>
 
-          <h3 style="margin-top:16px;">Host Screenshot Preview</h3>
-          <p class="small">Start host server with preview enabled, then load screenshot on demand.</p>
+          <h3 style="margin-top:16px;">Target Device Screenshot Preview</h3>
+          <p class="small">Point this to your target-machine screenshot endpoint. Example: a lightweight screenshot agent running on the target computer.</p>
 
           <div class="settings-grid">
             <div style="grid-column: 1 / -1;">
               <label class="label" for="screenshot-url">Screenshot URL</label>
-              <input id="screenshot-url" class="input" type="text" placeholder="http://127.0.0.1:9876/screenshot.bmp">
+              <input id="screenshot-url" class="input" type="text" placeholder="http://192.168.1.55:9988/screenshot.bmp">
             </div>
             <div>
               <label class="checkbox-row">
@@ -189,12 +193,12 @@
           </div>
 
           <div class="screenshot-frame">
-            <img id="screenshot-image" alt="Host screenshot preview">
+            <img id="screenshot-image" alt="Target screenshot preview">
           </div>
           <div id="screenshot-status" class="status-line">Screenshot idle.</div>
 
           <h3 style="margin-top:16px;">Record Keyboard + Mouse Actions</h3>
-          <p class="small">Records actions sent from this UI into a replay file you can store on ESP32 and run later for exact playback.</p>
+          <p class="small">Record from this UI or directly from incoming KVM bridge packets, then save replay files on ESP32.</p>
 
           <div class="toolbar">
             <button id="record-start-btn" class="btn-primary">Start Recording</button>
@@ -205,12 +209,22 @@
 
           <div class="settings-grid">
             <div>
+              <label class="label" for="record-source">Recording Source</label>
+              <select id="record-source" class="input">
+                <option value="ui" selected>This Web UI</option>
+                <option value="kvm_bridge">KVM Bridge (Incoming UDP)</option>
+              </select>
+            </div>
+            <div>
               <label class="label" for="record-file-name">Action File Name</label>
               <input class="input" id="record-file-name" type="text" placeholder="session-action.txt">
             </div>
             <div>
               <label class="label" for="action-files-select">Stored Action Files</label>
               <select id="action-files-select" class="input"></select>
+            </div>
+            <div style="grid-column: 1 / -1;">
+              <div id="record-bridge-status" class="small">Bridge recorder idle.</div>
             </div>
           </div>
 
@@ -354,6 +368,14 @@
               </div>
               <input id="line-delay" type="range" min="0" max="250" step="1">
               <div id="line-delay-value" class="slider-value">0 ms</div>
+            </div>
+
+            <div class="slider-item">
+              <div class="label-row">
+                <label class="label" for="kvm-mouse-smooth">KVM Mouse Smoothness (%)</label>
+              </div>
+              <input id="kvm-mouse-smooth" type="range" min="25" max="250" step="5">
+              <div id="kvm-mouse-smooth-value" class="slider-value">100%</div>
             </div>
           </div>
 

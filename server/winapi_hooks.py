@@ -182,10 +182,17 @@ user32.DefWindowProcW.restype = ctypes.c_long
 # ═══════════════════════════════════════════════════════════════════
 
 class InputHookManager:
-    def __init__(self, state: InputState, toggle_vk: int = VK_F8, toggle_label: str = "F8"):
+    def __init__(
+        self,
+        state: InputState,
+        toggle_vk: int = VK_F8,
+        toggle_label: str = "F8",
+        block_local_input: bool = False,
+    ):
         self.state = state
         self.toggle_vk = toggle_vk
         self.toggle_label = toggle_label
+        self.block_local_input = bool(block_local_input)
         self.toggle_pressed = False
         self.wnd_proc_cb = WNDPROC(self._wnd_proc)
         self.keyboard_proc_cb = HOOKPROC(self._keyboard_proc)
@@ -287,48 +294,55 @@ class InputHookManager:
                     self.toggle_pressed = False
                 return 1
 
+            consume_local = False
             with self.state.lock:
                 if self.state.kvm_active:
                     VK_INSERT = 0x2D
                     if vk == VK_INSERT and is_down and (self.state.modifiers & 0x22):
                         self.state.start_paste()
-                        return 1
+                        consume_local = True
 
                     if self.state.pasting:
                         if vk == 0x1B and is_down:  # Escape
                             self.state.cancel_paste()
-                        return 1
+                        consume_local = True
 
-                    if vk == 0x0D and is_extended:
-                        hid_code = 0x58
-                        if is_down: self.state.pressed_keys.add(hid_code)
-                        else: self.state.pressed_keys.discard(hid_code)
-                        self.state.kbd_dirty = True
-                    elif vk in VK_MODIFIER_MAP:
-                        bit = VK_MODIFIER_MAP[vk]
-                        if is_down: self.state.modifiers |= (1 << bit)
-                        else: self.state.modifiers &= ~(1 << bit)
-                        self.state.kbd_dirty = True
-                    elif vk in VK_TO_CONSUMER:
-                        usage = VK_TO_CONSUMER[vk]
-                        if is_down: self.state.consumer_usage = usage
-                        else:
-                            if self.state.consumer_usage == usage:
-                                self.state.consumer_usage = 0
-                        self.state.consumer_dirty = True
-                    else:
-                        hid_code = VK_TO_HID.get(vk)
-                        if hid_code is not None:
+                    if not consume_local:
+                        if vk == 0x0D and is_extended:
+                            hid_code = 0x58
                             if is_down: self.state.pressed_keys.add(hid_code)
                             else: self.state.pressed_keys.discard(hid_code)
                             self.state.kbd_dirty = True
+                        elif vk in VK_MODIFIER_MAP:
+                            bit = VK_MODIFIER_MAP[vk]
+                            if is_down: self.state.modifiers |= (1 << bit)
+                            else: self.state.modifiers &= ~(1 << bit)
+                            self.state.kbd_dirty = True
+                        elif vk in VK_TO_CONSUMER:
+                            usage = VK_TO_CONSUMER[vk]
+                            if is_down: self.state.consumer_usage = usage
+                            else:
+                                if self.state.consumer_usage == usage:
+                                    self.state.consumer_usage = 0
+                            self.state.kbd_dirty = True
+                            self.state.consumer_dirty = True
+                        else:
+                            hid_code = VK_TO_HID.get(vk)
+                            if hid_code is not None:
+                                if is_down: self.state.pressed_keys.add(hid_code)
+                                else: self.state.pressed_keys.discard(hid_code)
+                                self.state.kbd_dirty = True
 
-                    return 1
+                    if self.block_local_input:
+                        consume_local = True
+
+            if consume_local:
+                return 1
 
         return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
     def _mouse_proc(self, nCode: int, wParam: int, lParam: int) -> int:
-        if nCode >= 0:
+        if nCode >= 0 and self.block_local_input:
             with self.state.lock:
                 if self.state.kvm_active:
                     return 1

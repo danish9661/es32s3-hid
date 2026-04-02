@@ -232,9 +232,24 @@ const mouseAccum = {
 
 const recorder = {
   active: false,
+  source: "ui",
+  bridgeActive: false,
   lastEventAt: 0,
   events: [],
 };
+
+const bridgeMouseButtonMasks = [1, 2, 4, 8, 16];
+
+const bridgeModifierMap = [
+  { bit: 0x01, code: KEY.CTRL },
+  { bit: 0x02, code: KEY.SHIFT },
+  { bit: 0x04, code: KEY.ALT },
+  { bit: 0x08, code: KEY.GUI },
+  { bit: 0x10, code: KEY.CTRL },
+  { bit: 0x20, code: KEY.SHIFT },
+  { bit: 0x40, code: KEY.ALT },
+  { bit: 0x80, code: KEY.GUI },
+];
 
 let leftMouseHeld = false;
 
@@ -253,6 +268,12 @@ function clampNumber(value, min, max) {
   if (v < min) return min;
   if (v > max) return max;
   return v;
+}
+
+function getKvmMouseSmoothScale() {
+  const slider = qs("kvm-mouse-smooth");
+  const percent = slider ? clampNumber(slider.value, 25, 250) : 100;
+  return Number(percent) / 100;
 }
 
 function formatHex16(value) {
@@ -586,7 +607,7 @@ function parseComboString(combo) {
 }
 
 function recordActionEvent(type, payload = {}) {
-  if (!recorder.active) return;
+  if (!recorder.active || recorder.source !== "ui") return;
 
   const now = Date.now();
   const delay = recorder.lastEventAt > 0
@@ -1087,15 +1108,16 @@ function bindTrackpad() {
     const prev = trackpadPointers.get(event.pointerId);
     const dx = event.clientX - prev.x;
     const dy = event.clientY - prev.y;
+    const smoothScale = getKvmMouseSmoothScale();
 
     trackpadPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
     if (trackpadPointers.size >= 2) {
-      mouseAccum.wheel += (-dy * 0.2);
+      mouseAccum.wheel += (-dy * 0.2 * smoothScale);
       setText("mouse-status", "Gesture scroll.");
     } else {
-      mouseAccum.dx += (dx * 1.45);
-      mouseAccum.dy += (dy * 1.45);
+      mouseAccum.dx += (dx * 1.45 * smoothScale);
+      mouseAccum.dy += (dy * 1.45 * smoothScale);
       setText("mouse-status", "Pointer move.");
     }
   });
@@ -1288,8 +1310,11 @@ function shellQuote(value) {
   return `"${escaped}"`;
 }
 
-function buildHostCommand(deviceIp, port, withPreview = true) {
+function buildHostCommand(deviceIp, port, options = {}) {
   const host = deviceIp || "192.168.4.1";
+  const noPreview = options.noPreview !== false;
+  const blockLocalInput = Boolean(options.blockLocalInput);
+
   const base = [
     "python",
     "server/server.py",
@@ -1298,10 +1323,14 @@ function buildHostCommand(deviceIp, port, withPreview = true) {
     "--toggle-key", "f8",
   ];
 
-  if (withPreview) {
-    base.push("--preview-port", "9876");
-  } else {
+  if (noPreview) {
     base.push("--no-preview");
+  } else {
+    base.push("--preview-port", "9876");
+  }
+
+  if (blockLocalInput) {
+    base.push("--block-local-input");
   }
 
   return base.join(" ");
@@ -1311,17 +1340,26 @@ function updateKvmHelperPanel(statusData = {}) {
   const ip = statusData.device_ip || "192.168.4.1";
   const port = Number(statusData.port || qs("kvm-port")?.value || 4210);
 
-  const cmdMain = buildHostCommand(ip, port, true);
-  const cmdNoPreview = buildHostCommand(ip, port, false);
+  const cmdMain = buildHostCommand(ip, port, {
+    noPreview: true,
+    blockLocalInput: false,
+  });
+  const cmdNoPreview = buildHostCommand(ip, port, {
+    noPreview: true,
+    blockLocalInput: true,
+  });
+  const targetCaptureCommand = "python server/target_screenshot_server.py --port 9988";
 
   const mainEl = qs("kvm-cmd-main");
   const lowEl = qs("kvm-cmd-no-preview");
+  const targetCaptureEl = qs("target-capture-cmd");
   if (mainEl) mainEl.value = cmdMain;
   if (lowEl) lowEl.value = cmdNoPreview;
+  if (targetCaptureEl) targetCaptureEl.value = targetCaptureCommand;
 
   const screenshotUrlInput = qs("screenshot-url");
   if (screenshotUrlInput && !screenshotUrlInput.value.trim()) {
-    screenshotUrlInput.value = "http://127.0.0.1:9876/screenshot.bmp";
+    screenshotUrlInput.value = "http://192.168.1.55:9988/screenshot.bmp";
   }
 }
 
@@ -1341,6 +1379,9 @@ function updateKvmLinkIndicator(statusData = {}) {
   if (linkState === "connected") {
     dot.classList.add("connected");
     label = "Status: connected";
+  } else if (linkState === "bind-failed") {
+    dot.classList.add("offline");
+    label = "Status: bind failed";
   } else if (linkState === "waiting" || linkState === "stale") {
     dot.classList.add("warning");
     label = linkState === "waiting" ? "Status: waiting for packets" : "Status: stale";
@@ -1359,6 +1400,160 @@ function sanitizeActionFilename(name) {
   const cleaned = String(name || "").trim();
   if (!/^[a-zA-Z0-9_.\- ]{1,64}$/.test(cleaned)) return "";
   return cleaned;
+}
+
+function getRecordSource() {
+  const raw = qs("record-source")?.value;
+  return raw === "kvm_bridge" ? "kvm_bridge" : "ui";
+}
+
+function modifierCodesFromMask(mask) {
+  const codeSet = new Set();
+  bridgeModifierMap.forEach((entry) => {
+    if (mask & entry.bit) {
+      codeSet.add(entry.code);
+    }
+  });
+  return Array.from(codeSet);
+}
+
+function normalizedBridgeKeySet(keys) {
+  const out = new Set();
+  if (!Array.isArray(keys)) return out;
+
+  keys.forEach((key) => {
+    const code = Math.trunc(clampNumber(key, 0, 255));
+    if (code > 0) out.add(code);
+  });
+
+  return out;
+}
+
+function convertBridgeEventsToRecorderEvents(bridgeEvents = []) {
+  const out = [];
+  let previousDt = 0;
+  let previousButtons = 0;
+  let previousModifiers = 0;
+  let previousKeys = new Set();
+
+  bridgeEvents.forEach((rawEvent) => {
+    const event = rawEvent && typeof rawEvent === "object" ? rawEvent : {};
+    const dt = Math.trunc(clampNumber(event.dt, 0, 3_600_000));
+    const baseDelay = Math.max(0, dt - previousDt);
+    previousDt = dt;
+
+    let firstAction = true;
+    const pushAction = (action) => {
+      out.push({
+        delay: firstAction ? baseDelay : 0,
+        ...action,
+      });
+      firstAction = false;
+    };
+
+    if (event.type === "mouse") {
+      const dx = Math.trunc(clampNumber(event.dx, -4096, 4096));
+      const dy = Math.trunc(clampNumber(event.dy, -4096, 4096));
+      const wheel = Math.trunc(clampNumber(event.wheel, -127, 127));
+      const pan = Math.trunc(clampNumber(event.pan, -127, 127));
+      const buttons = Math.trunc(clampNumber(event.buttons, 0, 31));
+
+      if (dx !== 0 || dy !== 0) {
+        pushAction({ type: "mouse_move", dx, dy });
+      }
+      if (wheel !== 0 || pan !== 0) {
+        pushAction({ type: "mouse_scroll", wheel, pan });
+      }
+
+      const changed = previousButtons ^ buttons;
+      bridgeMouseButtonMasks.forEach((mask) => {
+        if ((changed & mask) === 0) return;
+        const action = (buttons & mask) ? 1 : 2;
+        pushAction({ type: "mouse_button", button: mask, action });
+      });
+
+      previousButtons = buttons;
+      return;
+    }
+
+    if (event.type === "keyboard") {
+      const modifierMask = Math.trunc(clampNumber(event.modifiers, 0, 255));
+      const currentModifierCodes = modifierCodesFromMask(modifierMask);
+      const previousModifierCodes = modifierCodesFromMask(previousModifiers);
+
+      previousModifierCodes.forEach((code) => {
+        if (!currentModifierCodes.includes(code)) {
+          pushAction({ type: "key_up", code });
+        }
+      });
+
+      const currentKeys = normalizedBridgeKeySet(event.keys);
+      previousKeys.forEach((code) => {
+        if (!currentKeys.has(code)) {
+          pushAction({ type: "key_up", code });
+        }
+      });
+
+      currentModifierCodes.forEach((code) => {
+        if (!previousModifierCodes.includes(code)) {
+          pushAction({ type: "key_down", code });
+        }
+      });
+
+      currentKeys.forEach((code) => {
+        if (!previousKeys.has(code)) {
+          pushAction({ type: "key_down", code });
+        }
+      });
+
+      previousModifiers = modifierMask;
+      previousKeys = currentKeys;
+      return;
+    }
+
+    if (event.type === "consumer") {
+      const usage = Math.trunc(clampNumber(event.usage, 0, 0xFFFF));
+      pushAction({ type: "consumer", usage });
+    }
+  });
+
+  if (previousButtons !== 0 || previousKeys.size > 0 || previousModifiers !== 0) {
+    out.push({ delay: 0, type: "key_release_all" });
+    bridgeMouseButtonMasks.forEach((mask) => {
+      if (previousButtons & mask) {
+        out.push({ delay: 0, type: "mouse_button", button: mask, action: 2 });
+      }
+    });
+  }
+
+  return out;
+}
+
+async function loadBridgeRecordStatus() {
+  const el = qs("record-bridge-status");
+  if (!el) return;
+
+  try {
+    const res = await api("/api/kvm_bridge_record_status");
+    if (!res.ok) {
+      el.textContent = "Bridge recorder status unavailable.";
+      return;
+    }
+
+    const data = await res.json();
+    const enabled = Boolean(data.enabled);
+    const count = Math.trunc(clampNumber(data.count, 0, 1_000_000));
+    const dropped = Math.trunc(clampNumber(data.dropped, 0, 1_000_000));
+    const duration = Math.trunc(clampNumber(data.duration_ms, 0, 86_400_000));
+
+    if (enabled) {
+      el.textContent = `Bridge recording active: ${count} events (${dropped} dropped, ${duration} ms).`;
+    } else {
+      el.textContent = `Bridge recorder ready: ${count} events buffered (${dropped} dropped).`;
+    }
+  } catch (_) {
+    el.textContent = "Bridge recorder status unavailable.";
+  }
 }
 
 function encodeActionFile(events) {
@@ -1386,36 +1581,119 @@ function encodeActionFile(events) {
       lines.push(`${delay}|mouse_scroll|${Math.trunc(clampNumber(event.wheel, -127, 127))}|${Math.trunc(clampNumber(event.pan, -127, 127))}`);
     } else if (event.type === "mouse_button") {
       lines.push(`${delay}|mouse_button|${Math.trunc(clampNumber(event.button, 1, 31))}|${Math.trunc(clampNumber(event.action, 0, 2))}`);
+    } else if (event.type === "consumer") {
+      lines.push(`${delay}|consumer|${Math.trunc(clampNumber(event.usage, 0, 0xFFFF))}`);
     }
   });
 
   return `${lines.join("\n")}\n`;
 }
 
-function startRecording() {
-  recorder.events = [];
-  recorder.active = true;
+async function startRecording() {
+  const source = getRecordSource();
+  recorder.source = source;
   recorder.lastEventAt = 0;
-  setText("record-status", "Recording started. Use Remote/Keyboard/Mouse controls now.");
-}
-
-function stopRecording() {
+  recorder.events = [];
   recorder.active = false;
-  if (recorder.events.length > 0) {
-    setText("record-status", `Recording stopped. ${recorder.events.length} events captured.`);
-  } else {
-    setText("record-status", "Recording stopped with 0 events. Trigger UI input while recording.");
+  recorder.bridgeActive = false;
+
+  if (source === "ui") {
+    recorder.active = true;
+    setText("record-status", "UI recording started. Use Remote/Keyboard/Mouse controls now.");
+    return;
+  }
+
+  try {
+    const res = await api("/api/kvm_bridge_record_start", { method: "POST" });
+    if (!res.ok) {
+      setText("record-status", "Failed to start KVM bridge recording.");
+      return;
+    }
+
+    recorder.bridgeActive = true;
+    setText("record-status", "Bridge recording started. Generate traffic from host sender now.");
+    await loadBridgeRecordStatus();
+  } catch (_) {
+    setText("record-status", "Network error while starting bridge recording.");
   }
 }
 
-function clearRecording() {
+async function stopRecording() {
+  if (recorder.source !== "kvm_bridge") {
+    recorder.active = false;
+    if (recorder.events.length > 0) {
+      setText("record-status", `Recording stopped. ${recorder.events.length} events captured.`);
+    } else {
+      setText("record-status", "Recording stopped with 0 events. Trigger UI input while recording.");
+    }
+    return;
+  }
+
+  if (!recorder.bridgeActive) {
+    setText("record-status", "Bridge recorder is not running.");
+    return;
+  }
+
+  try {
+    const stopRes = await api("/api/kvm_bridge_record_stop", { method: "POST" });
+    if (!stopRes.ok) {
+      setText("record-status", "Failed to stop bridge recorder.");
+      return;
+    }
+
+    const exportRes = await api("/api/kvm_bridge_record_export");
+    if (!exportRes.ok) {
+      setText("record-status", "Bridge recorder stopped, but export failed.");
+      recorder.bridgeActive = false;
+      return;
+    }
+
+    const data = await exportRes.json();
+    const bridgeEvents = Array.isArray(data.events) ? data.events : [];
+    recorder.events = convertBridgeEventsToRecorderEvents(bridgeEvents);
+    recorder.bridgeActive = false;
+    recorder.active = false;
+    recorder.lastEventAt = 0;
+
+    const dropped = Math.trunc(clampNumber(data.dropped, 0, 1_000_000));
+    setText(
+      "record-status",
+      `Bridge recording imported: ${recorder.events.length} replay events (${bridgeEvents.length} raw packets, ${dropped} dropped).`,
+    );
+    await loadBridgeRecordStatus();
+  } catch (_) {
+    setText("record-status", "Network error while stopping bridge recorder.");
+  }
+}
+
+async function clearRecording() {
   recorder.active = false;
   recorder.lastEventAt = 0;
   recorder.events = [];
+
+  const shouldClearBridge = getRecordSource() === "kvm_bridge" || recorder.source === "kvm_bridge";
+  recorder.bridgeActive = false;
+
+  if (shouldClearBridge) {
+    try {
+      await api("/api/kvm_bridge_record_stop", { method: "POST" });
+      await api("/api/kvm_bridge_record_clear", { method: "POST" });
+      await loadBridgeRecordStatus();
+    } catch (_) {
+      setText("record-status", "Local recorder cleared, but bridge clear failed.");
+      return;
+    }
+  }
+
   setText("record-status", "Recorder cleared.");
 }
 
 async function saveRecordingToDevice() {
+  if (recorder.bridgeActive) {
+    setText("record-status", "Stop bridge recording before saving.");
+    return;
+  }
+
   if (!recorder.events.length) {
     setText("record-status", "Nothing to save. Record actions first.");
     return;
@@ -1450,6 +1728,11 @@ async function saveRecordingToDevice() {
 }
 
 function downloadRecordingFile() {
+  if (recorder.bridgeActive) {
+    setText("record-status", "Stop bridge recording before downloading.");
+    return;
+  }
+
   if (!recorder.events.length) {
     setText("record-status", "No recording available.");
     return;
@@ -1601,16 +1884,22 @@ async function loadKvmStatus() {
     setText("kvm-last-source", d.last_source_ip || "-");
     updateKvmLinkIndicator(d);
     updateKvmHelperPanel(d);
+    loadBridgeRecordStatus();
 
     const listening = d.enabled && d.bound;
     const ip = d.device_ip || "ESP32 IP";
+    const configuredPort = Number(d.port || 4210);
+    const boundPort = Number(d.bound_port || 0);
+    const effectivePort = boundPort > 0 ? boundPort : configuredPort;
     if (d.connected) {
       const age = Number.isFinite(Number(d.packet_age_ms)) ? `, age ${d.packet_age_ms} ms` : "";
-      setText("kvm-status", `Connected on UDP ${d.port} (${ip}${age})`);
+      setText("kvm-status", `Connected on UDP ${effectivePort} (${ip}${age})`);
     } else if (listening) {
-      setText("kvm-status", `Listening on UDP ${d.port} (${ip}), waiting packets`);
+      setText("kvm-status", `Listening on UDP ${effectivePort} (${ip}), waiting packets`);
+    } else if (d.enabled && String(d.bind_error || "").length > 0) {
+      setText("kvm-status", `KVM enabled but bind failed on UDP ${configuredPort} (${d.bind_error}).`);
     } else if (d.enabled) {
-      setText("kvm-status", "KVM enabled but UDP socket not bound yet.");
+      setText("kvm-status", `KVM enabled but UDP ${configuredPort} not bound yet.`);
     } else {
       setText("kvm-status", "KVM listener disabled.");
     }
@@ -1637,12 +1926,12 @@ async function loadScreenshotPreview() {
 
   const baseUrl = urlInput.value.trim();
   if (!baseUrl) {
-    setText("screenshot-status", "Enter screenshot URL first.");
+    setText("screenshot-status", "Enter target screenshot URL first.");
     return;
   }
 
   const fetchUrl = baseUrl.includes("?") ? `${baseUrl}&_t=${Date.now()}` : `${baseUrl}?_t=${Date.now()}`;
-  setText("screenshot-status", "Loading screenshot...");
+  setText("screenshot-status", "Loading target screenshot...");
 
   try {
     const res = await fetch(fetchUrl, { cache: "no-store" });
@@ -1659,9 +1948,9 @@ async function loadScreenshotPreview() {
     screenshotObjectUrl = URL.createObjectURL(blob);
     img.src = screenshotObjectUrl;
     img.classList.add("visible");
-    setText("screenshot-status", `Screenshot updated (${blob.size} bytes).`);
+    setText("screenshot-status", `Target screenshot updated (${blob.size} bytes).`);
   } catch (err) {
-    setText("screenshot-status", `Screenshot load failed: ${String(err?.message || err)}`);
+    setText("screenshot-status", `Target screenshot load failed: ${String(err?.message || err)}`);
   }
 }
 
@@ -1688,6 +1977,7 @@ function syncScreenshotAutoRefresh() {
 
 async function saveKvmConfig() {
   const port = Math.trunc(clampNumber(qs("kvm-port").value, 1, 65535));
+  qs("kvm-port").value = String(port);
   const payload = {
     enabled: qs("kvm-enabled").checked,
     port,
@@ -1706,7 +1996,19 @@ async function saveKvmConfig() {
       return;
     }
 
-    setText("kvm-status", "KVM config saved.");
+    let bindMessage = "KVM config saved.";
+    try {
+      const info = await res.json();
+      if (payload.enabled && !info.bound) {
+        const err = String(info.bind_error || "not-bound");
+        bindMessage = `KVM saved, but UDP bind failed (${err}).`;
+      } else if (payload.enabled && info.bound) {
+        const effectivePort = Math.trunc(clampNumber(info.bound_port || port, 1, 65535));
+        bindMessage = `KVM config saved and listening on UDP ${effectivePort}.`;
+      }
+    } catch (_) {}
+
+    setText("kvm-status", bindMessage);
     await loadKvmStatus();
   } catch (_) {
     setText("kvm-status", "Network error while saving KVM config.");
@@ -1752,6 +2054,7 @@ async function loadSettings() {
     qs("burst-chars").value = d.burst_chars ?? 24;
     qs("burst-pause").value = d.burst_pause ?? 10;
     qs("line-delay").value = d.line_delay ?? 40;
+    qs("kvm-mouse-smooth").value = d.kvm_mouse_smooth ?? 100;
     qs("led-bright").value = d.bright ?? 50;
 
     qs("login-rate-limit").checked = d.login_rate_limit ?? true;
@@ -1771,6 +2074,7 @@ async function loadSettings() {
     updateSliderReadout("burst-chars", "");
     updateSliderReadout("burst-pause", " ms");
     updateSliderReadout("line-delay", " ms");
+    updateSliderReadout("kvm-mouse-smooth", "%");
 
     updateVendorPresetSelectionFromFields();
     setText("settings-status", "Settings loaded.");
@@ -1799,6 +2103,7 @@ async function saveSettings() {
     burst_chars: Number(qs("burst-chars").value),
     burst_pause: Number(qs("burst-pause").value),
     line_delay: Number(qs("line-delay").value),
+    kvm_mouse_smooth: Number(qs("kvm-mouse-smooth").value),
     bright: Number(qs("led-bright").value),
 
     login_rate_limit: qs("login-rate-limit").checked,
@@ -1956,10 +2261,13 @@ function initEvents() {
   qs("kvm-release-all-btn").addEventListener("click", releaseAllHid);
 
   qs("copy-kvm-cmd-main").addEventListener("click", () => {
-    copyTextToClipboard(qs("kvm-cmd-main").value, "Main command copied.");
+    copyTextToClipboard(qs("kvm-cmd-main").value, "Shared mode command copied.");
   });
   qs("copy-kvm-cmd-no-preview").addEventListener("click", () => {
-    copyTextToClipboard(qs("kvm-cmd-no-preview").value, "No-preview command copied.");
+    copyTextToClipboard(qs("kvm-cmd-no-preview").value, "Exclusive mode command copied.");
+  });
+  qs("copy-target-capture-cmd").addEventListener("click", () => {
+    copyTextToClipboard(qs("target-capture-cmd").value, "Target capture command copied.");
   });
 
   qs("load-screenshot-btn").addEventListener("click", loadScreenshotPreview);
@@ -1977,6 +2285,16 @@ function initEvents() {
   qs("record-clear-btn").addEventListener("click", clearRecording);
   qs("record-download-btn").addEventListener("click", downloadRecordingFile);
   qs("record-save-device-btn").addEventListener("click", saveRecordingToDevice);
+  qs("record-source").addEventListener("change", () => {
+    const source = getRecordSource();
+    recorder.source = source;
+    if (source === "kvm_bridge") {
+      loadBridgeRecordStatus();
+      setText("record-status", "Source set to KVM Bridge. Click Start Recording to capture incoming packets.");
+    } else {
+      setText("record-status", "Source set to Web UI.");
+    }
+  });
   qs("action-run-btn").addEventListener("click", runSelectedActionFile);
   qs("action-delete-btn").addEventListener("click", deleteSelectedActionFile);
   qs("action-refresh-btn").addEventListener("click", loadActionFiles);
@@ -2017,6 +2335,7 @@ function initEvents() {
   bindSliderReadout("burst-chars", "");
   bindSliderReadout("burst-pause", " ms");
   bindSliderReadout("line-delay", " ms");
+  bindSliderReadout("kvm-mouse-smooth", "%");
 
   updateKvmHelperPanel();
 }
