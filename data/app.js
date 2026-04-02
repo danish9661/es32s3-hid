@@ -1,6 +1,9 @@
 let currentFile = "";
 let statusPollTimer = null;
 let mouseFlushTimer = null;
+let screenshotRefreshTimer = null;
+let screenshotObjectUrl = "";
+let activeTab = "editor";
 
 const KEY = {
   CTRL: 128,
@@ -169,8 +172,53 @@ const keyboardLayout = [
   ],
 ];
 
-const quickActionStorageKey = "esp32_custom_quick_actions_v2";
+const quickActionStorageKey = "esp32_custom_quick_actions_v3";
+const keyboardPrefsStorageKey = "esp32_keyboard_prefs_v1";
+const preferenceBundleVersion = 1;
+const actionFileHeader = "# ESP32-HID-ACTION-V1";
+
+const defaultKeyboardPrefs = {
+  tapHoldMs: 35,
+  comboHoldMs: 45,
+  autoReleaseOnTabSwitch: true,
+};
+
+const usbVendorPresets = {
+  espressif: {
+    vendorName: "Espressif",
+    vid: 0x303A,
+    pid: 0x0002,
+    productName: "ESP32-S3 HID Console",
+  },
+  arduino: {
+    vendorName: "Arduino SA",
+    vid: 0x2341,
+    pid: 0x0036,
+    productName: "Arduino Keyboard",
+  },
+  adafruit: {
+    vendorName: "Adafruit",
+    vid: 0x239A,
+    pid: 0x810B,
+    productName: "Adafruit HID Bridge",
+  },
+  logitech: {
+    vendorName: "Logitech",
+    vid: 0x046D,
+    pid: 0xC31C,
+    productName: "USB Keyboard",
+  },
+  microsoft: {
+    vendorName: "Microsoft",
+    vid: 0x045E,
+    pid: 0x07F8,
+    productName: "USB Input Device",
+  },
+};
+
 let customQuickActions = [];
+let keyboardPrefs = { ...defaultKeyboardPrefs };
+
 const lockedModifiers = new Set();
 const pointerPressedKeys = new Map();
 
@@ -182,6 +230,12 @@ const mouseAccum = {
   pan: 0,
 };
 
+const recorder = {
+  active: false,
+  lastEventAt: 0,
+  events: [],
+};
+
 let leftMouseHeld = false;
 
 function qs(id) {
@@ -191,6 +245,73 @@ function qs(id) {
 function setText(id, text) {
   const el = qs(id);
   if (el) el.textContent = text;
+}
+
+function clampNumber(value, min, max) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return min;
+  if (v < min) return min;
+  if (v > max) return max;
+  return v;
+}
+
+function formatHex16(value) {
+  const v = clampNumber(value, 0, 0xFFFF);
+  return `0x${Math.trunc(v).toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+function parseHexOrDecStrict(rawValue) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return null;
+
+  const base = raw.toLowerCase().startsWith("0x") ? 16 : 10;
+  const parsed = Number.parseInt(raw, base);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < 0 || parsed > 0xFFFF) return null;
+  return parsed;
+}
+
+function parseHexOrDec(rawValue, fallback) {
+  const parsed = parseHexOrDecStrict(rawValue);
+  return parsed == null ? fallback : parsed;
+}
+
+function downloadTextFile(filename, content, mimeType = "text/plain") {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+
+  URL.revokeObjectURL(url);
+}
+
+async function copyTextToClipboard(text, successLabel = "Copied.") {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      setText("kvm-status", successLabel);
+      return;
+    }
+  } catch (_) {}
+
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    document.execCommand("copy");
+    setText("kvm-status", successLabel);
+  } catch (_) {
+    setText("kvm-status", "Copy failed. Please copy manually.");
+  } finally {
+    document.body.removeChild(ta);
+  }
 }
 
 async function api(path, options = {}) {
@@ -348,17 +469,7 @@ async function deleteCurrentFile() {
 
 function downloadCurrentFile() {
   if (!currentFile) return;
-
-  const content = qs("code-area").value;
-  const blob = new Blob([content], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = currentFile;
-  a.click();
-
-  URL.revokeObjectURL(url);
+  downloadTextFile(currentFile, qs("code-area").value, "text/plain");
 }
 
 async function runScript() {
@@ -415,27 +526,6 @@ async function injectLiveText() {
   }
 }
 
-async function sendKeyTap(code) {
-  try {
-    const res = await api("/api/live_key", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-
-    if (!res.ok) {
-      setText("remote-status", "Key send failed (busy or invalid).");
-      return false;
-    }
-
-    setText("remote-status", `Key sent: ${code}`);
-    return true;
-  } catch (_) {
-    setText("remote-status", "Network error while sending key.");
-    return false;
-  }
-}
-
 function parseKeyToken(token) {
   const lower = token.toLowerCase().trim();
   if (!lower) return null;
@@ -457,17 +547,21 @@ function parseKeyToken(token) {
   return null;
 }
 
-async function sendCombo(combo) {
+function modsToFlags(mods) {
+  return (mods.ctrl ? 1 : 0)
+    | (mods.alt ? 2 : 0)
+    | (mods.shift ? 4 : 0)
+    | (mods.gui ? 8 : 0);
+}
+
+function parseComboString(combo) {
   const rawParts = combo
     .toLowerCase()
     .split("+")
     .map((s) => s.trim())
     .filter(Boolean);
 
-  if (!rawParts.length) {
-    setText("remote-status", "Invalid combo.");
-    return;
-  }
+  if (!rawParts.length) return null;
 
   const mods = {
     ctrl: false,
@@ -486,14 +580,73 @@ async function sendCombo(combo) {
   }
 
   const code = parseKeyToken(lastToken);
-  if (code == null) {
-    setText("remote-status", `Unsupported combo key: ${lastToken}`);
+  if (code == null) return null;
+
+  return { mods, code, keyToken: lastToken };
+}
+
+function recordActionEvent(type, payload = {}) {
+  if (!recorder.active) return;
+
+  const now = Date.now();
+  const delay = recorder.lastEventAt > 0
+    ? clampNumber(now - recorder.lastEventAt, 0, 60000)
+    : 0;
+
+  recorder.lastEventAt = now;
+  recorder.events.push({
+    delay: Math.trunc(delay),
+    type,
+    ...payload,
+  });
+
+  if (recorder.events.length > 8000) {
+    recorder.active = false;
+    setText("record-status", "Recorder stopped: max 8000 events reached.");
     return;
   }
 
+  setText("record-status", `Recording... ${recorder.events.length} events`);
+}
+
+async function sendKeyTap(code, hold = keyboardPrefs.tapHoldMs, shouldRecord = true) {
+  const safeHold = Math.trunc(clampNumber(hold, 10, 300));
+
+  try {
+    const res = await api("/api/live_key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, hold: safeHold }),
+    });
+
+    if (!res.ok) {
+      setText("remote-status", "Key send failed (busy or invalid).");
+      return false;
+    }
+
+    if (shouldRecord) {
+      recordActionEvent("key_tap", { code, hold: safeHold });
+    }
+    setText("remote-status", `Key sent: ${code}`);
+    return true;
+  } catch (_) {
+    setText("remote-status", "Network error while sending key.");
+    return false;
+  }
+}
+
+async function sendCombo(combo, hold = keyboardPrefs.comboHoldMs, shouldRecord = true) {
+  const parsed = parseComboString(combo);
+  if (!parsed) {
+    setText("remote-status", "Invalid combo.");
+    return false;
+  }
+
+  const safeHold = Math.trunc(clampNumber(hold, 10, 300));
   const payload = {
-    ...mods,
-    code,
+    ...parsed.mods,
+    code: parsed.code,
+    hold: safeHold,
   };
 
   try {
@@ -505,25 +658,49 @@ async function sendCombo(combo) {
 
     if (!res.ok) {
       setText("remote-status", "Combo failed (busy or invalid).");
-      return;
+      return false;
     }
 
+    if (shouldRecord) {
+      recordActionEvent("combo", {
+        flags: modsToFlags(parsed.mods),
+        code: parsed.code,
+        hold: safeHold,
+      });
+    }
     setText("remote-status", `Combo sent: ${combo}`);
+    return true;
   } catch (_) {
     setText("remote-status", "Network error while sending combo.");
+    return false;
   }
 }
 
-async function sendKeyboardEvent(action, code = null, hold = 30) {
+async function sendKeyboardEvent(action, code = null, hold = null, shouldRecord = true) {
   const payload = { action };
-  if (code != null) payload.code = code;
-  if (hold != null) payload.hold = hold;
+  if (code != null) payload.code = Number(code);
+  if (hold != null) payload.hold = Math.trunc(clampNumber(hold, 10, 300));
 
   const res = await api("/api/kbd_event", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
+  if (res.ok && shouldRecord) {
+    if (action === "down") {
+      recordActionEvent("key_down", { code: Number(code) });
+    } else if (action === "up") {
+      recordActionEvent("key_up", { code: Number(code) });
+    } else if (action === "release_all") {
+      recordActionEvent("key_release_all", {});
+    } else if (action === "tap") {
+      recordActionEvent("key_tap", {
+        code: Number(code),
+        hold: payload.hold || keyboardPrefs.tapHoldMs,
+      });
+    }
+  }
 
   return res.ok;
 }
@@ -535,8 +712,21 @@ function loadCustomActions() {
       customQuickActions = [];
       return;
     }
+
     const parsed = JSON.parse(raw);
-    customQuickActions = Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) {
+      customQuickActions = [];
+      return;
+    }
+
+    customQuickActions = parsed
+      .filter((item) => item && typeof item.label === "string" && typeof item.combo === "string")
+      .map((item) => ({
+        label: item.label.trim().slice(0, 40),
+        combo: item.combo.trim().slice(0, 50),
+      }))
+      .filter((item) => item.label.length > 0 && item.combo.length > 0)
+      .slice(0, 80);
   } catch (_) {
     customQuickActions = [];
   }
@@ -544,6 +734,116 @@ function loadCustomActions() {
 
 function saveCustomActions() {
   localStorage.setItem(quickActionStorageKey, JSON.stringify(customQuickActions));
+}
+
+function loadKeyboardPrefs() {
+  try {
+    const raw = localStorage.getItem(keyboardPrefsStorageKey);
+    if (!raw) {
+      keyboardPrefs = { ...defaultKeyboardPrefs };
+      return;
+    }
+
+    const parsed = JSON.parse(raw);
+    keyboardPrefs = {
+      tapHoldMs: Math.trunc(clampNumber(parsed.tapHoldMs, 10, 180)),
+      comboHoldMs: Math.trunc(clampNumber(parsed.comboHoldMs, 10, 220)),
+      autoReleaseOnTabSwitch: Boolean(parsed.autoReleaseOnTabSwitch),
+    };
+  } catch (_) {
+    keyboardPrefs = { ...defaultKeyboardPrefs };
+  }
+}
+
+function saveKeyboardPrefs() {
+  localStorage.setItem(keyboardPrefsStorageKey, JSON.stringify(keyboardPrefs));
+}
+
+function updateKeyboardPrefReadout(id, unit = "") {
+  const input = qs(id);
+  const out = qs(`${id}-value`);
+  if (!input || !out) return;
+  out.textContent = `${input.value}${unit}`;
+}
+
+function applyKeyboardPrefsToUI() {
+  qs("kbd-pref-tap-hold").value = String(keyboardPrefs.tapHoldMs);
+  qs("kbd-pref-combo-hold").value = String(keyboardPrefs.comboHoldMs);
+  qs("kbd-pref-auto-release").checked = Boolean(keyboardPrefs.autoReleaseOnTabSwitch);
+  updateKeyboardPrefReadout("kbd-pref-tap-hold", " ms");
+  updateKeyboardPrefReadout("kbd-pref-combo-hold", " ms");
+}
+
+function bindKeyboardPreferenceControls() {
+  const tap = qs("kbd-pref-tap-hold");
+  const combo = qs("kbd-pref-combo-hold");
+  const autoRelease = qs("kbd-pref-auto-release");
+
+  tap.addEventListener("input", () => {
+    keyboardPrefs.tapHoldMs = Math.trunc(clampNumber(tap.value, 10, 180));
+    updateKeyboardPrefReadout("kbd-pref-tap-hold", " ms");
+    saveKeyboardPrefs();
+    setText("kbd-pref-status", "Keyboard preferences saved locally.");
+  });
+
+  combo.addEventListener("input", () => {
+    keyboardPrefs.comboHoldMs = Math.trunc(clampNumber(combo.value, 10, 220));
+    updateKeyboardPrefReadout("kbd-pref-combo-hold", " ms");
+    saveKeyboardPrefs();
+    setText("kbd-pref-status", "Keyboard preferences saved locally.");
+  });
+
+  autoRelease.addEventListener("change", () => {
+    keyboardPrefs.autoReleaseOnTabSwitch = autoRelease.checked;
+    saveKeyboardPrefs();
+    setText("kbd-pref-status", "Keyboard preferences saved locally.");
+  });
+}
+
+function exportPreferenceBundle() {
+  const payload = {
+    version: preferenceBundleVersion,
+    exportedAt: new Date().toISOString(),
+    customQuickActions,
+    keyboardPrefs,
+  };
+
+  downloadTextFile("esp32-hid-preferences.json", JSON.stringify(payload, null, 2), "application/json");
+  setText("remote-status", "Preferences exported.");
+}
+
+async function importPreferenceBundle(file) {
+  const text = await file.text();
+  const parsed = JSON.parse(text);
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Invalid preferences file.");
+  }
+
+  if (Array.isArray(parsed.customQuickActions)) {
+    customQuickActions = parsed.customQuickActions
+      .filter((item) => item && typeof item.label === "string" && typeof item.combo === "string")
+      .map((item) => ({
+        label: item.label.trim().slice(0, 40),
+        combo: item.combo.trim().slice(0, 50),
+      }))
+      .filter((item) => item.label.length > 0 && item.combo.length > 0)
+      .slice(0, 80);
+  }
+
+  if (parsed.keyboardPrefs && typeof parsed.keyboardPrefs === "object") {
+    keyboardPrefs = {
+      tapHoldMs: Math.trunc(clampNumber(parsed.keyboardPrefs.tapHoldMs, 10, 180)),
+      comboHoldMs: Math.trunc(clampNumber(parsed.keyboardPrefs.comboHoldMs, 10, 220)),
+      autoReleaseOnTabSwitch: Boolean(parsed.keyboardPrefs.autoReleaseOnTabSwitch),
+    };
+  }
+
+  saveCustomActions();
+  saveKeyboardPrefs();
+  renderCustomActions();
+  applyKeyboardPrefsToUI();
+  setText("remote-status", "Preferences imported.");
 }
 
 function renderCustomActions() {
@@ -590,13 +890,13 @@ function addCustomAction() {
     return;
   }
 
-  const code = parseKeyToken(combo.split("+").pop().trim());
-  if (code == null) {
+  const parsed = parseComboString(combo);
+  if (!parsed) {
     alert("Invalid shortcut key.");
     return;
   }
 
-  customQuickActions.push({ label, combo });
+  customQuickActions.push({ label: label.slice(0, 40), combo: combo.slice(0, 50) });
   saveCustomActions();
   renderCustomActions();
 
@@ -623,16 +923,21 @@ function renderKeyboard65() {
         keyEl.classList.add("disabled");
       } else {
         keyEl.dataset.code = String(keyDef.code);
+
         keyEl.addEventListener("pointerdown", (event) => {
           event.preventDefault();
           if (pointerPressedKeys.has(event.pointerId)) return;
 
           const code = Number(keyEl.dataset.code);
-          sendKeyboardEvent("down", code)
+          sendKeyboardEvent("down", code, null, true)
             .then((ok) => {
               if (!ok) return;
+
               pointerPressedKeys.set(event.pointerId, { code, keyEl, label: keyDef.label });
               keyEl.classList.add("active");
+              try {
+                keyEl.setPointerCapture(event.pointerId);
+              } catch (_) {}
               setText("keyboard-status", `Key down: ${keyDef.label}`);
             })
             .catch(() => {
@@ -647,7 +952,7 @@ function renderKeyboard65() {
           pointerPressedKeys.delete(pointerId);
           active.keyEl.classList.remove("active");
 
-          sendKeyboardEvent("up", active.code)
+          sendKeyboardEvent("up", active.code, null, true)
             .then(() => {
               setText("keyboard-status", `Key up: ${active.label}`);
             })
@@ -676,7 +981,7 @@ function bindModifierLocks() {
 
       if (lockedModifiers.has(code)) {
         try {
-          await sendKeyboardEvent("up", code);
+          await sendKeyboardEvent("up", code, null, true);
           lockedModifiers.delete(code);
           button.classList.remove("active");
           setText("keyboard-status", "Modifier unlocked.");
@@ -685,7 +990,7 @@ function bindModifierLocks() {
         }
       } else {
         try {
-          await sendKeyboardEvent("down", code);
+          await sendKeyboardEvent("down", code, null, true);
           lockedModifiers.add(code);
           button.classList.add("active");
           setText("keyboard-status", "Modifier locked.");
@@ -698,7 +1003,7 @@ function bindModifierLocks() {
 
   qs("release-all-keys-btn").addEventListener("click", async () => {
     try {
-      await sendKeyboardEvent("release_all");
+      await sendKeyboardEvent("release_all", null, null, true);
       lockedModifiers.clear();
       pointerPressedKeys.clear();
       document.querySelectorAll(".mod-lock").forEach((btn) => btn.classList.remove("active"));
@@ -708,6 +1013,22 @@ function bindModifierLocks() {
       setText("keyboard-status", "Failed to release all keys.");
     }
   });
+}
+
+function buttonNameToMask(name) {
+  const v = String(name || "").toLowerCase();
+  if (v === "left") return 1;
+  if (v === "right") return 2;
+  if (v === "middle") return 4;
+  if (v === "backward") return 8;
+  if (v === "forward") return 16;
+  return 1;
+}
+
+function mouseActionToCode(action) {
+  if (action === "down") return 1;
+  if (action === "up") return 2;
+  return 0;
 }
 
 function startMouseFlushLoop() {
@@ -727,7 +1048,11 @@ function startMouseFlushLoop() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dx, dy }),
-      }).catch(() => {});
+      })
+        .then((res) => {
+          if (res.ok) recordActionEvent("mouse_move", { dx, dy });
+        })
+        .catch(() => {});
     }
 
     if (wheel !== 0 || pan !== 0) {
@@ -738,7 +1063,11 @@ function startMouseFlushLoop() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ wheel, pan }),
-      }).catch(() => {});
+      })
+        .then((res) => {
+          if (res.ok) recordActionEvent("mouse_scroll", { wheel, pan });
+        })
+        .catch(() => {});
     }
   }, 28);
 }
@@ -783,11 +1112,14 @@ function bindTrackpad() {
 
   qs("mouse-left-btn").addEventListener("click", async () => {
     try {
-      await api("/api/mouse_button", {
+      const res = await api("/api/mouse_button", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ button: "left", action: "click" }),
       });
+      if (!res.ok) throw new Error();
+
+      recordActionEvent("mouse_button", { button: 1, action: 0 });
       setText("mouse-status", "Left click sent.");
     } catch (_) {
       setText("mouse-status", "Left click failed.");
@@ -796,11 +1128,14 @@ function bindTrackpad() {
 
   qs("mouse-right-btn").addEventListener("click", async () => {
     try {
-      await api("/api/mouse_button", {
+      const res = await api("/api/mouse_button", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ button: "right", action: "click" }),
       });
+      if (!res.ok) throw new Error();
+
+      recordActionEvent("mouse_button", { button: 2, action: 0 });
       setText("mouse-status", "Right click sent.");
     } catch (_) {
       setText("mouse-status", "Right click failed.");
@@ -810,22 +1145,28 @@ function bindTrackpad() {
   qs("mouse-left-hold-btn").addEventListener("click", async () => {
     try {
       if (!leftMouseHeld) {
-        await api("/api/mouse_button", {
+        const res = await api("/api/mouse_button", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ button: "left", action: "down" }),
         });
+        if (!res.ok) throw new Error();
+
         leftMouseHeld = true;
         qs("mouse-left-hold-btn").textContent = "Release Left";
+        recordActionEvent("mouse_button", { button: 1, action: 1 });
         setText("mouse-status", "Left button held.");
       } else {
-        await api("/api/mouse_button", {
+        const res = await api("/api/mouse_button", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ button: "left", action: "up" }),
         });
+        if (!res.ok) throw new Error();
+
         leftMouseHeld = false;
         qs("mouse-left-hold-btn").textContent = "Hold Left";
+        recordActionEvent("mouse_button", { button: 1, action: 2 });
         setText("mouse-status", "Left button released.");
       }
     } catch (_) {
@@ -847,6 +1188,8 @@ function bindTrackpad() {
       });
       leftMouseHeld = false;
       qs("mouse-left-hold-btn").textContent = "Hold Left";
+      recordActionEvent("mouse_button", { button: 1, action: 2 });
+      recordActionEvent("mouse_button", { button: 2, action: 2 });
       setText("mouse-status", "Buttons released.");
     } catch (_) {
       setText("mouse-status", "Failed to release buttons.");
@@ -908,6 +1251,488 @@ function generateRandomToken(hexChars = 48) {
     .join("");
 }
 
+function applyVendorPreset(presetKey) {
+  if (presetKey === "custom") return;
+
+  const preset = usbVendorPresets[presetKey];
+  if (!preset) return;
+
+  qs("usb-vendor-name").value = preset.vendorName;
+  qs("usb-vendor-id").value = formatHex16(preset.vid);
+  qs("usb-product-id").value = formatHex16(preset.pid);
+  qs("usb-product-name").value = preset.productName;
+}
+
+function updateVendorPresetSelectionFromFields() {
+  const vid = parseHexOrDecStrict(qs("usb-vendor-id").value);
+  const vendorName = qs("usb-vendor-name").value.trim().toLowerCase();
+  const productId = parseHexOrDecStrict(qs("usb-product-id").value);
+
+  let matched = "custom";
+  Object.entries(usbVendorPresets).forEach(([key, preset]) => {
+    if (
+      matched === "custom"
+      && preset.vid === vid
+      && preset.vendorName.toLowerCase() === vendorName
+      && preset.pid === productId
+    ) {
+      matched = key;
+    }
+  });
+
+  qs("usb-vendor-preset").value = matched;
+}
+
+function shellQuote(value) {
+  const escaped = String(value || "").replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function buildHostCommand(deviceIp, port, withPreview = true) {
+  const host = deviceIp || "192.168.4.1";
+  const base = [
+    "python",
+    "server/server.py",
+    "--host", shellQuote(host),
+    "--port", String(port || 4210),
+    "--toggle-key", "f8",
+  ];
+
+  if (withPreview) {
+    base.push("--preview-port", "9876");
+  } else {
+    base.push("--no-preview");
+  }
+
+  return base.join(" ");
+}
+
+function updateKvmHelperPanel(statusData = {}) {
+  const ip = statusData.device_ip || "192.168.4.1";
+  const port = Number(statusData.port || qs("kvm-port")?.value || 4210);
+
+  const cmdMain = buildHostCommand(ip, port, true);
+  const cmdNoPreview = buildHostCommand(ip, port, false);
+
+  const mainEl = qs("kvm-cmd-main");
+  const lowEl = qs("kvm-cmd-no-preview");
+  if (mainEl) mainEl.value = cmdMain;
+  if (lowEl) lowEl.value = cmdNoPreview;
+
+  const screenshotUrlInput = qs("screenshot-url");
+  if (screenshotUrlInput && !screenshotUrlInput.value.trim()) {
+    screenshotUrlInput.value = "http://127.0.0.1:9876/screenshot.bmp";
+  }
+}
+
+function updateKvmLinkIndicator(statusData = {}) {
+  const dot = qs("kvm-link-dot");
+  const stateEl = qs("kvm-link-state");
+  const ageEl = qs("kvm-link-age");
+  if (!dot || !stateEl || !ageEl) return;
+
+  dot.classList.remove("connected", "warning", "offline");
+
+  const linkState = String(statusData.link_state || "unknown");
+  const age = Number(statusData.packet_age_ms);
+  const hasAge = Number.isFinite(age) && age >= 0 && age < 0xFFFFFF00;
+
+  let label = "Status: unknown";
+  if (linkState === "connected") {
+    dot.classList.add("connected");
+    label = "Status: connected";
+  } else if (linkState === "waiting" || linkState === "stale") {
+    dot.classList.add("warning");
+    label = linkState === "waiting" ? "Status: waiting for packets" : "Status: stale";
+  } else if (linkState === "disabled") {
+    label = "Status: disabled";
+  } else {
+    dot.classList.add("offline");
+    label = "Status: offline";
+  }
+
+  stateEl.textContent = label;
+  ageEl.textContent = hasAge ? `Last packet age: ${age} ms` : "Last packet age: -";
+}
+
+function sanitizeActionFilename(name) {
+  const cleaned = String(name || "").trim();
+  if (!/^[a-zA-Z0-9_.\- ]{1,64}$/.test(cleaned)) return "";
+  return cleaned;
+}
+
+function encodeActionFile(events) {
+  const lines = [
+    actionFileHeader,
+    "# delay_ms|event|params",
+  ];
+
+  events.forEach((event) => {
+    const delay = Math.trunc(clampNumber(event.delay, 0, 60000));
+
+    if (event.type === "key_tap") {
+      lines.push(`${delay}|key_tap|${Math.trunc(clampNumber(event.code, 0, 255))}|${Math.trunc(clampNumber(event.hold, 10, 300))}`);
+    } else if (event.type === "key_down") {
+      lines.push(`${delay}|key_down|${Math.trunc(clampNumber(event.code, 0, 255))}`);
+    } else if (event.type === "key_up") {
+      lines.push(`${delay}|key_up|${Math.trunc(clampNumber(event.code, 0, 255))}`);
+    } else if (event.type === "key_release_all") {
+      lines.push(`${delay}|key_release_all`);
+    } else if (event.type === "combo") {
+      lines.push(`${delay}|combo|${Math.trunc(clampNumber(event.flags, 0, 15))}|${Math.trunc(clampNumber(event.code, 0, 255))}|${Math.trunc(clampNumber(event.hold, 10, 300))}`);
+    } else if (event.type === "mouse_move") {
+      lines.push(`${delay}|mouse_move|${Math.trunc(clampNumber(event.dx, -2048, 2048))}|${Math.trunc(clampNumber(event.dy, -2048, 2048))}`);
+    } else if (event.type === "mouse_scroll") {
+      lines.push(`${delay}|mouse_scroll|${Math.trunc(clampNumber(event.wheel, -127, 127))}|${Math.trunc(clampNumber(event.pan, -127, 127))}`);
+    } else if (event.type === "mouse_button") {
+      lines.push(`${delay}|mouse_button|${Math.trunc(clampNumber(event.button, 1, 31))}|${Math.trunc(clampNumber(event.action, 0, 2))}`);
+    }
+  });
+
+  return `${lines.join("\n")}\n`;
+}
+
+function startRecording() {
+  recorder.events = [];
+  recorder.active = true;
+  recorder.lastEventAt = 0;
+  setText("record-status", "Recording started. Use Remote/Keyboard/Mouse controls now.");
+}
+
+function stopRecording() {
+  recorder.active = false;
+  if (recorder.events.length > 0) {
+    setText("record-status", `Recording stopped. ${recorder.events.length} events captured.`);
+  } else {
+    setText("record-status", "Recording stopped with 0 events. Trigger UI input while recording.");
+  }
+}
+
+function clearRecording() {
+  recorder.active = false;
+  recorder.lastEventAt = 0;
+  recorder.events = [];
+  setText("record-status", "Recorder cleared.");
+}
+
+async function saveRecordingToDevice() {
+  if (!recorder.events.length) {
+    setText("record-status", "Nothing to save. Record actions first.");
+    return;
+  }
+
+  const entered = qs("record-file-name").value.trim() || `action-${Date.now()}.txt`;
+  const safeName = sanitizeActionFilename(entered);
+  if (!safeName) {
+    setText("record-status", "Invalid file name. Allowed: letters, numbers, space, _, -, .");
+    return;
+  }
+
+  const content = encodeActionFile(recorder.events);
+  try {
+    const res = await api(`/api/action_file/save?name=${encodeURIComponent(safeName)}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: content,
+    });
+
+    if (!res.ok) {
+      setText("record-status", "Failed to save recording to ESP.");
+      return;
+    }
+
+    qs("record-file-name").value = safeName;
+    await loadActionFiles();
+    setText("record-status", `Saved to ESP as ${safeName}.`);
+  } catch (_) {
+    setText("record-status", "Network error while saving recording.");
+  }
+}
+
+function downloadRecordingFile() {
+  if (!recorder.events.length) {
+    setText("record-status", "No recording available.");
+    return;
+  }
+
+  const entered = qs("record-file-name").value.trim() || `action-${Date.now()}.txt`;
+  const safeName = sanitizeActionFilename(entered) || `action-${Date.now()}.txt`;
+  downloadTextFile(safeName, encodeActionFile(recorder.events), "text/plain");
+  setText("record-status", "Recording downloaded.");
+}
+
+function selectedActionFileName() {
+  const select = qs("action-files-select");
+  if (!select || !select.value) return "";
+  return sanitizeActionFilename(select.value);
+}
+
+async function loadActionFiles() {
+  const select = qs("action-files-select");
+  if (!select) return;
+
+  try {
+    const res = await api("/api/action_files");
+    if (!res.ok) {
+      setText("record-status", "Failed to list action files.");
+      return;
+    }
+
+    const files = await res.json();
+    select.innerHTML = "";
+
+    if (!Array.isArray(files) || files.length === 0) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No action files";
+      select.appendChild(option);
+      return;
+    }
+
+    files
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((file) => {
+        const option = document.createElement("option");
+        option.value = file.name;
+        option.textContent = `${file.name} (${file.size} bytes)`;
+        select.appendChild(option);
+      });
+  } catch (_) {
+    setText("record-status", "Network error while listing action files.");
+  }
+}
+
+async function runSelectedActionFile() {
+  const name = selectedActionFileName();
+  if (!name) {
+    setText("record-status", "Select an action file first.");
+    return;
+  }
+
+  try {
+    const res = await api(`/api/action_file/run?name=${encodeURIComponent(name)}`, { method: "POST" });
+    if (!res.ok) {
+      setText("record-status", "Failed to queue action file.");
+      return;
+    }
+
+    setText("record-status", `Queued action file: ${name}`);
+    refreshStatus();
+  } catch (_) {
+    setText("record-status", "Network error while queueing action file.");
+  }
+}
+
+async function deleteSelectedActionFile() {
+  const name = selectedActionFileName();
+  if (!name) {
+    setText("record-status", "Select an action file first.");
+    return;
+  }
+
+  if (!confirm(`Delete action file ${name}?`)) return;
+
+  try {
+    const res = await api(`/api/action_file/delete?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      setText("record-status", "Failed to delete action file.");
+      return;
+    }
+
+    await loadActionFiles();
+    setText("record-status", "Action file deleted.");
+  } catch (_) {
+    setText("record-status", "Network error while deleting action file.");
+  }
+}
+
+async function importActionFileToDevice(file) {
+  const safeName = sanitizeActionFilename(file?.name || "imported-action.txt");
+  if (!safeName) {
+    setText("record-status", "Invalid imported file name.");
+    return;
+  }
+
+  const text = await file.text();
+  if (!text || text.length < 8) {
+    setText("record-status", "Imported file is empty.");
+    return;
+  }
+
+  try {
+    const res = await api(`/api/action_file/save?name=${encodeURIComponent(safeName)}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: text,
+    });
+
+    if (!res.ok) {
+      setText("record-status", "Failed to import file to ESP.");
+      return;
+    }
+
+    qs("record-file-name").value = safeName;
+    await loadActionFiles();
+    setText("record-status", `Imported and saved as ${safeName}.`);
+  } catch (_) {
+    setText("record-status", "Network error while importing action file.");
+  }
+}
+
+async function loadKvmStatus() {
+  try {
+    const res = await api("/api/kvm_status");
+    if (!res.ok) {
+      setText("kvm-status", "Failed to load KVM status.");
+      return;
+    }
+
+    const d = await res.json();
+
+    qs("kvm-enabled").checked = Boolean(d.enabled);
+    qs("kvm-port").value = d.port ?? 4210;
+    qs("kvm-allowed-ip").value = d.allowed_ip || "";
+
+    setText("kvm-packets-rx", String(d.packets_rx ?? 0));
+    setText("kvm-packets-dropped", String(d.packets_dropped ?? 0));
+    setText("kvm-last-seq", d.last_sequence != null ? String(d.last_sequence) : "-");
+    setText("kvm-last-source", d.last_source_ip || "-");
+    updateKvmLinkIndicator(d);
+    updateKvmHelperPanel(d);
+
+    const listening = d.enabled && d.bound;
+    const ip = d.device_ip || "ESP32 IP";
+    if (d.connected) {
+      const age = Number.isFinite(Number(d.packet_age_ms)) ? `, age ${d.packet_age_ms} ms` : "";
+      setText("kvm-status", `Connected on UDP ${d.port} (${ip}${age})`);
+    } else if (listening) {
+      setText("kvm-status", `Listening on UDP ${d.port} (${ip}), waiting packets`);
+    } else if (d.enabled) {
+      setText("kvm-status", "KVM enabled but UDP socket not bound yet.");
+    } else {
+      setText("kvm-status", "KVM listener disabled.");
+    }
+  } catch (_) {
+    setText("kvm-status", "Network error while loading KVM status.");
+  }
+}
+
+function getScreenshotRefreshIntervalMs() {
+  return Math.trunc(clampNumber(qs("screenshot-interval-ms")?.value || 2000, 500, 10000));
+}
+
+function cleanupScreenshotObjectUrl() {
+  if (screenshotObjectUrl) {
+    URL.revokeObjectURL(screenshotObjectUrl);
+    screenshotObjectUrl = "";
+  }
+}
+
+async function loadScreenshotPreview() {
+  const img = qs("screenshot-image");
+  const urlInput = qs("screenshot-url");
+  if (!img || !urlInput) return;
+
+  const baseUrl = urlInput.value.trim();
+  if (!baseUrl) {
+    setText("screenshot-status", "Enter screenshot URL first.");
+    return;
+  }
+
+  const fetchUrl = baseUrl.includes("?") ? `${baseUrl}&_t=${Date.now()}` : `${baseUrl}?_t=${Date.now()}`;
+  setText("screenshot-status", "Loading screenshot...");
+
+  try {
+    const res = await fetch(fetchUrl, { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    if (!blob || blob.size < 32) {
+      throw new Error("empty-image");
+    }
+
+    cleanupScreenshotObjectUrl();
+    screenshotObjectUrl = URL.createObjectURL(blob);
+    img.src = screenshotObjectUrl;
+    img.classList.add("visible");
+    setText("screenshot-status", `Screenshot updated (${blob.size} bytes).`);
+  } catch (err) {
+    setText("screenshot-status", `Screenshot load failed: ${String(err?.message || err)}`);
+  }
+}
+
+function stopScreenshotAutoRefresh() {
+  if (screenshotRefreshTimer) {
+    clearInterval(screenshotRefreshTimer);
+    screenshotRefreshTimer = null;
+  }
+}
+
+function syncScreenshotAutoRefresh() {
+  const enabled = Boolean(qs("screenshot-auto-refresh")?.checked);
+  stopScreenshotAutoRefresh();
+
+  if (!enabled) return;
+
+  const interval = getScreenshotRefreshIntervalMs();
+  screenshotRefreshTimer = setInterval(() => {
+    if (activeTab === "kvm") {
+      loadScreenshotPreview();
+    }
+  }, interval);
+}
+
+async function saveKvmConfig() {
+  const port = Math.trunc(clampNumber(qs("kvm-port").value, 1, 65535));
+  const payload = {
+    enabled: qs("kvm-enabled").checked,
+    port,
+    allowed_ip: qs("kvm-allowed-ip").value.trim(),
+  };
+
+  try {
+    const res = await api("/api/kvm_config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      setText("kvm-status", "Failed to apply KVM config.");
+      return;
+    }
+
+    setText("kvm-status", "KVM config saved.");
+    await loadKvmStatus();
+  } catch (_) {
+    setText("kvm-status", "Network error while saving KVM config.");
+  }
+}
+
+async function releaseAllHid() {
+  try {
+    const res = await api("/api/hid_release_all", { method: "POST" });
+    if (!res.ok) {
+      setText("kvm-status", "Failed to release HID state.");
+      return;
+    }
+
+    lockedModifiers.clear();
+    pointerPressedKeys.clear();
+    document.querySelectorAll(".mod-lock").forEach((btn) => btn.classList.remove("active"));
+    document.querySelectorAll(".vk-key.active").forEach((btn) => btn.classList.remove("active"));
+    leftMouseHeld = false;
+    qs("mouse-left-hold-btn").textContent = "Hold Left";
+    setText("kvm-status", "All HID keys/buttons released.");
+  } catch (_) {
+    setText("kvm-status", "Network error while releasing HID state.");
+  }
+}
+
 async function loadSettings() {
   try {
     const res = await api("/api/get_settings");
@@ -933,11 +1758,21 @@ async function loadSettings() {
     qs("proxy-auth-enabled").checked = d.proxy_auth_enabled ?? false;
     qs("proxy-auth-token").value = d.proxy_auth_token || "";
 
+    qs("usb-vendor-name").value = d.usb_vendor_name || "Espressif";
+    qs("usb-product-name").value = d.usb_product_name || "ESP32-S3 HID Console";
+    qs("usb-vendor-id").value = formatHex16(d.usb_vid ?? 0x303A);
+    qs("usb-product-id").value = formatHex16(d.usb_pid ?? 0x0002);
+
+    if (typeof d.kvm_enabled === "boolean") qs("kvm-enabled").checked = d.kvm_enabled;
+    if (d.kvm_port != null) qs("kvm-port").value = d.kvm_port;
+    if (typeof d.kvm_allowed_ip === "string") qs("kvm-allowed-ip").value = d.kvm_allowed_ip;
+
     updateSliderReadout("typing-delay", " ms");
     updateSliderReadout("burst-chars", "");
     updateSliderReadout("burst-pause", " ms");
     updateSliderReadout("line-delay", " ms");
 
+    updateVendorPresetSelectionFromFields();
     setText("settings-status", "Settings loaded.");
   } catch (_) {
     setText("settings-status", "Network error while loading settings.");
@@ -945,6 +1780,14 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  const usbVid = parseHexOrDecStrict(qs("usb-vendor-id").value);
+  const usbPid = parseHexOrDecStrict(qs("usb-product-id").value);
+
+  if (usbVid == null || usbPid == null) {
+    setText("settings-status", "USB VID/PID must be valid 16-bit hex or decimal values.");
+    return;
+  }
+
   const payload = {
     ap_ssid: qs("ap-ssid").value,
     ap_pass: qs("ap-pass").value,
@@ -961,6 +1804,15 @@ async function saveSettings() {
     login_rate_limit: qs("login-rate-limit").checked,
     proxy_auth_enabled: qs("proxy-auth-enabled").checked,
     proxy_auth_token: qs("proxy-auth-token").value.trim(),
+
+    usb_vendor_name: qs("usb-vendor-name").value.trim(),
+    usb_product_name: qs("usb-product-name").value.trim(),
+    usb_vid: usbVid,
+    usb_pid: usbPid,
+
+    kvm_enabled: qs("kvm-enabled").checked,
+    kvm_port: Math.trunc(clampNumber(qs("kvm-port").value, 1, 65535)),
+    kvm_allowed_ip: qs("kvm-allowed-ip").value.trim(),
   };
 
   const newPass = qs("admin-pass").value.trim();
@@ -980,8 +1832,21 @@ async function saveSettings() {
       return;
     }
 
+    let restartNeeded = false;
+    try {
+      const responseData = await res.json();
+      restartNeeded = Boolean(responseData.usb_restart_required);
+    } catch (_) {}
+
     qs("admin-pass").value = "";
-    setText("settings-status", "Settings saved.");
+    if (restartNeeded) {
+      setText("settings-status", "Settings saved. USB identity changes will apply after reboot.");
+    } else {
+      setText("settings-status", "Settings saved.");
+    }
+
+    updateVendorPresetSelectionFromFields();
+    await loadKvmStatus();
   } catch (_) {
     setText("settings-status", "Network error while saving settings.");
   }
@@ -1008,12 +1873,30 @@ function setupTabs() {
   const buttons = Array.from(document.querySelectorAll(".tab-btn"));
   const views = Array.from(document.querySelectorAll(".view"));
 
-  function activate(tab) {
+  async function activate(tab) {
+    if (
+      activeTab === "keyboard"
+      && tab !== "keyboard"
+      && keyboardPrefs.autoReleaseOnTabSwitch
+    ) {
+      try {
+        await sendKeyboardEvent("release_all", null, null, false);
+      } catch (_) {}
+      lockedModifiers.clear();
+      pointerPressedKeys.clear();
+      document.querySelectorAll(".mod-lock").forEach((btn) => btn.classList.remove("active"));
+      document.querySelectorAll(".vk-key.active").forEach((btn) => btn.classList.remove("active"));
+    }
+
+    activeTab = tab;
     buttons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     views.forEach((v) => v.classList.toggle("active", v.id === `view-${tab}`));
 
     if (tab === "settings") {
       loadSettings();
+    } else if (tab === "kvm") {
+      loadKvmStatus();
+      loadActionFiles();
     }
   }
 
@@ -1054,6 +1937,63 @@ function initEvents() {
 
   qs("add-custom-action-btn").addEventListener("click", addCustomAction);
 
+  qs("export-pref-btn").addEventListener("click", exportPreferenceBundle);
+  qs("import-pref-btn").addEventListener("click", () => qs("import-pref-input").click());
+  qs("import-pref-input").addEventListener("change", async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      await importPreferenceBundle(file);
+    } catch (_) {
+      setText("remote-status", "Invalid preference file.");
+    }
+  });
+
+  qs("save-kvm-btn").addEventListener("click", saveKvmConfig);
+  qs("refresh-kvm-btn").addEventListener("click", loadKvmStatus);
+  qs("kvm-release-all-btn").addEventListener("click", releaseAllHid);
+
+  qs("copy-kvm-cmd-main").addEventListener("click", () => {
+    copyTextToClipboard(qs("kvm-cmd-main").value, "Main command copied.");
+  });
+  qs("copy-kvm-cmd-no-preview").addEventListener("click", () => {
+    copyTextToClipboard(qs("kvm-cmd-no-preview").value, "No-preview command copied.");
+  });
+
+  qs("load-screenshot-btn").addEventListener("click", loadScreenshotPreview);
+  qs("open-screenshot-url-btn").addEventListener("click", () => {
+    const url = qs("screenshot-url").value.trim();
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+
+  qs("screenshot-auto-refresh").addEventListener("change", syncScreenshotAutoRefresh);
+  qs("screenshot-interval-ms").addEventListener("change", syncScreenshotAutoRefresh);
+
+  qs("record-start-btn").addEventListener("click", startRecording);
+  qs("record-stop-btn").addEventListener("click", stopRecording);
+  qs("record-clear-btn").addEventListener("click", clearRecording);
+  qs("record-download-btn").addEventListener("click", downloadRecordingFile);
+  qs("record-save-device-btn").addEventListener("click", saveRecordingToDevice);
+  qs("action-run-btn").addEventListener("click", runSelectedActionFile);
+  qs("action-delete-btn").addEventListener("click", deleteSelectedActionFile);
+  qs("action-refresh-btn").addEventListener("click", loadActionFiles);
+
+  qs("action-import-btn").addEventListener("click", () => qs("action-import-input").click());
+  qs("action-import-input").addEventListener("change", async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      await importActionFileToDevice(file);
+    } catch (_) {
+      setText("record-status", "Failed to import action file.");
+    }
+  });
+
   qs("save-settings-btn").addEventListener("click", saveSettings);
   qs("reboot-btn").addEventListener("click", rebootDevice);
   qs("logout-btn").addEventListener("click", logout);
@@ -1063,14 +2003,27 @@ function initEvents() {
     setText("settings-status", "Generated a new proxy token. Save settings to apply.");
   });
 
+  qs("usb-vendor-preset").addEventListener("change", () => {
+    applyVendorPreset(qs("usb-vendor-preset").value);
+  });
+
+  ["usb-vendor-name", "usb-vendor-id", "usb-product-id"].forEach((id) => {
+    qs(id).addEventListener("input", () => {
+      qs("usb-vendor-preset").value = "custom";
+    });
+  });
+
   bindSliderReadout("typing-delay", " ms");
   bindSliderReadout("burst-chars", "");
   bindSliderReadout("burst-pause", " ms");
   bindSliderReadout("line-delay", " ms");
+
+  updateKvmHelperPanel();
 }
 
 async function bootstrap() {
   setupTabs();
+  loadKeyboardPrefs();
   initEvents();
   bindQuickActionButtons();
   bindHelpPanel();
@@ -1078,20 +2031,32 @@ async function bootstrap() {
   renderKeyboard65();
   bindModifierLocks();
   bindTrackpad();
+  bindKeyboardPreferenceControls();
   startMouseFlushLoop();
 
   loadCustomActions();
   renderCustomActions();
+  applyKeyboardPrefsToUI();
 
   await loadFiles();
   await refreshStatus();
+  await loadKvmStatus();
+  await loadActionFiles();
+  syncScreenshotAutoRefresh();
 
-  statusPollTimer = setInterval(refreshStatus, 1300);
+  statusPollTimer = setInterval(() => {
+    refreshStatus();
+    if (activeTab === "kvm") {
+      loadKvmStatus();
+    }
+  }, 1300);
 }
 
 window.addEventListener("beforeunload", () => {
   if (statusPollTimer) clearInterval(statusPollTimer);
   if (mouseFlushTimer) clearInterval(mouseFlushTimer);
+  stopScreenshotAutoRefresh();
+  cleanupScreenshotObjectUrl();
 });
 
 bootstrap();

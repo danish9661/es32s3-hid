@@ -15,6 +15,9 @@ This project is tuned for ESP32-S3 N16R8 (16 MB flash, 8 MB PSRAM).
 - Only one active user session at a time
 - Safer request buffering and queue handling
 - Improved typing speed controls (delay + burst tuning)
+- KVM UDP bridge (esp32-kvm-ip 16-byte packet compatible)
+- Action recorder file upload/run for keyboard + mouse playback
+- USB VID/PID + vendor/product name settings (apply on reboot)
 - Clean project structure with web assets in `data/`
 
 ## Project Structure
@@ -147,12 +150,95 @@ Live control:
 - `POST /api/mouse_move`
 - `POST /api/mouse_scroll`
 - `POST /api/mouse_button`
+- `POST /api/hid_release_all`
+
+KVM bridge:
+- `GET /api/kvm_status`
+- `POST /api/kvm_config`
+
+Action files:
+- `GET /api/action_files`
+- `GET /api/action_file/load?name=...`
+- `POST /api/action_file/save?name=...`
+- `POST /api/action_file/run?name=...`
+- `DELETE /api/action_file/delete?name=...`
 
 Settings:
 - `GET /api/get_settings`
 - `POST /api/save_settings`
 - `POST /api/reboot`
 - `GET /api/proxy_profile`
+
+## KVM Bridge (New)
+
+The KVM tab adds a UDP listener compatible with the 16-byte packet design used in:
+- https://github.com/KMChris/esp32-kvm-ip
+
+Supported packet types:
+- Mouse state packet (buttons + int16 dx/dy + wheel/pan)
+- Keyboard state packet (modifiers + 6-key rollover)
+- Consumer usage packet (media keys)
+
+You can configure:
+- Enable/disable listener
+- UDP port (default `4210`)
+- Optional allowed source IP filter
+
+### Host server launch (updated)
+
+Default toggle key is now `F8` (better for laptops). You can still use Scroll Lock if desired.
+
+Examples:
+
+```bash
+python server/server.py --host 192.168.4.1 --port 4210 --toggle-key f8
+```
+
+With screenshot preview service:
+
+```bash
+python server/server.py --host 192.168.4.1 --port 4210 --toggle-key f8 --preview-port 9876
+```
+
+Supported `--toggle-key` values:
+- `f8`
+- `f9`
+- `f10`
+- `f12`
+- `pause`
+- `scrolllock`
+
+Preview endpoint (host side):
+- `http://127.0.0.1:9876/screenshot.bmp`
+
+## Action Recording / Replay File
+
+The KVM tab can record keyboard and mouse actions sent from the web UI, save them as files on ESP (`/actions`), and replay them later.
+
+Replay file format is line-based:
+- `delay_ms|key_tap|code|hold`
+- `delay_ms|key_down|code`
+- `delay_ms|key_up|code`
+- `delay_ms|key_release_all`
+- `delay_ms|combo|flags|code|hold`
+- `delay_ms|mouse_move|dx|dy`
+- `delay_ms|mouse_scroll|wheel|pan`
+- `delay_ms|mouse_button|button|action`
+
+Where combo `flags` bitmask is:
+- `1`: Ctrl
+- `2`: Alt
+- `4`: Shift
+- `8`: GUI/Win
+
+## USB Identity Settings
+
+Settings now include:
+- Vendor preset dropdown
+- Custom USB Vendor Name + Vendor ID
+- Custom USB Product Name + Product ID
+
+These values are stored in settings and applied before `USB.begin()` on next boot.
 
 ## Notes
 

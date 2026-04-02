@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
@@ -8,8 +9,10 @@
 #include "USB.h"
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
+#include "USBHIDConsumerControl.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include <cstring>
 
 // --- BOARD / DEVICE CONFIG ---
 #ifndef STATUS_LED_PIN
@@ -25,6 +28,53 @@ constexpr uint8_t LOGIN_MAX_FAILURES = 5;
 constexpr uint8_t LOGIN_SLOT_COUNT = 12;
 constexpr const char *SETTINGS_FILE = "/settings.json";
 constexpr const char *SCRIPTS_DIR = "/scripts";
+constexpr const char *ACTIONS_DIR = "/actions";
+constexpr size_t ACTION_FILE_MAX_SIZE = 512UL * 1024UL;
+
+constexpr uint16_t KVM_DEFAULT_PORT = 4210;
+constexpr uint16_t KVM_PACKET_MAGIC = 0xCAFE;
+constexpr size_t KVM_PACKET_SIZE = 16;
+
+enum : uint8_t {
+  KVM_EVENT_MOUSE = 0x01,
+  KVM_EVENT_KEYBOARD = 0x02,
+  KVM_EVENT_CONSUMER = 0x03,
+};
+
+struct __attribute__((packed)) KvmMousePayload {
+  uint8_t buttons;
+  int16_t dx;
+  int16_t dy;
+  int8_t wheel;
+  int8_t pan;
+  uint8_t pad;
+};
+
+struct __attribute__((packed)) KvmKeyboardPayload {
+  uint8_t modifiers;
+  uint8_t reserved;
+  uint8_t keycodes[6];
+};
+
+struct __attribute__((packed)) KvmConsumerPayload {
+  uint16_t usageId;
+  uint8_t pad[6];
+};
+
+struct __attribute__((packed)) KvmPacket {
+  uint16_t magic;
+  uint32_t sequence;
+  uint8_t type;
+  uint8_t reserved;
+
+  union {
+    KvmMousePayload mouse;
+    KvmKeyboardPayload keyboard;
+    KvmConsumerPayload consumer;
+  } payload;
+};
+
+static_assert(sizeof(KvmPacket) == KVM_PACKET_SIZE, "KVM packet must be exactly 16 bytes");
 
 // --- USER SETTINGS (with defaults) ---
 String ap_ssid = "ESP32-Ducky-Pro";
@@ -38,6 +88,15 @@ bool loginRateLimitEnabled = true;
 bool proxyAuthEnabled = false;
 String proxyAuthToken = "";
 
+bool kvmEnabled = false;
+uint16_t kvmPort = KVM_DEFAULT_PORT;
+String kvmAllowedIp = "";
+
+uint16_t usbVendorId = 0x303A;
+uint16_t usbProductId = 0x0002;
+String usbVendorName = "Espressif";
+String usbProductName = "ESP32-S3 HID Console";
+
 int typeDelay = 6;
 int burstChars = 24;
 int burstPauseMs = 10;
@@ -47,8 +106,10 @@ int ledBrightness = 50;
 // --- RUNTIME OBJECTS ---
 USBHIDKeyboard Keyboard;
 USBHIDMouse Mouse;
+USBHIDConsumerControl Consumer;
 AsyncWebServer server(80);
 Adafruit_NeoPixel pixels(NUMPIXELS, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+WiFiUDP kvmUdp;
 
 char *psramBuffer = nullptr;
 size_t bufferIndex = 0;
@@ -72,11 +133,18 @@ struct LoginAttemptSlot {
 LoginAttemptSlot loginSlots[LOGIN_SLOT_COUNT];
 
 struct DuckyJob {
+  uint8_t type;
   size_t length;
-  bool isRawText;
+  char fileName[68];
 };
 
 QueueHandle_t jobQueue = nullptr;
+
+enum : uint8_t {
+  JOB_SCRIPT = 0,
+  JOB_RAW_TEXT = 1,
+  JOB_ACTION_FILE = 2,
+};
 
 enum class HidRealtimeType : uint8_t {
   KeyTap,
@@ -87,6 +155,9 @@ enum class HidRealtimeType : uint8_t {
   MouseMove,
   MouseButton,
   MouseScroll,
+  KvmKeyboardState,
+  KvmMouseState,
+  ConsumerControl,
 };
 
 enum : uint8_t {
@@ -109,9 +180,29 @@ struct HidRealtimeEvent {
   uint8_t mouseButton;
   uint8_t mouseAction;
   uint16_t holdMs;
+
+  uint8_t kvmModifiers;
+  uint8_t kvmKeys[6];
+  uint8_t kvmButtons;
+  int16_t kvmDx;
+  int16_t kvmDy;
+  int8_t kvmWheel;
+  int8_t kvmPan;
+
+  uint16_t consumerUsage;
 };
 
 QueueHandle_t hidEventQueue = nullptr;
+
+bool kvmUdpBound = false;
+uint16_t kvmBoundPort = 0;
+IPAddress kvmLastSourceIp = IPAddress(0, 0, 0, 0);
+uint32_t kvmLastSequence = 0;
+uint32_t kvmPacketsRx = 0;
+uint32_t kvmPacketsDropped = 0;
+uint32_t kvmPacketsEnqueued = 0;
+uint32_t kvmLastPacketMs = 0;
+bool kvmHasSequence = false;
 
 // --- HELPERS ---
 int clampInt(int value, int minimum, int maximum) {
@@ -122,6 +213,54 @@ int clampInt(int value, int minimum, int maximum) {
 
 int8_t clampInt8(int value, int minimum, int maximum) {
   return static_cast<int8_t>(clampInt(value, minimum, maximum));
+}
+
+bool parseUint16String(const String &raw, uint16_t &out) {
+  String value = raw;
+  value.trim();
+  if (value.isEmpty()) return false;
+
+  int base = 10;
+  if (value.startsWith("0x") || value.startsWith("0X")) {
+    base = 16;
+    value = value.substring(2);
+  }
+
+  if (value.isEmpty()) return false;
+
+  char *endPtr = nullptr;
+  long parsed = strtol(value.c_str(), &endPtr, base);
+  if (endPtr == value.c_str() || *endPtr != '\0') return false;
+  if (parsed < 0 || parsed > 0xFFFF) return false;
+
+  out = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+bool parseUint16JsonValue(const JsonVariantConst &variant, uint16_t &out) {
+  if (variant.is<uint16_t>()) {
+    out = variant.as<uint16_t>();
+    return true;
+  }
+
+  if (variant.is<int>()) {
+    int value = variant.as<int>();
+    if (value < 0 || value > 0xFFFF) return false;
+    out = static_cast<uint16_t>(value);
+    return true;
+  }
+
+  if (variant.is<const char *>()) {
+    String text = variant.as<const char *>();
+    return parseUint16String(text, out);
+  }
+
+  if (variant.is<String>()) {
+    String text = variant.as<String>();
+    return parseUint16String(text, out);
+  }
+
+  return false;
 }
 
 void setStatus(uint8_t r, uint8_t g, uint8_t b) {
@@ -137,6 +276,18 @@ bool isPrivateIPv4(const IPAddress &ip) {
   if (ip[0] == 169 && ip[1] == 254) return true;
   return false;
 }
+
+String normalizeOptionalIp(const String &raw) {
+  String v = raw;
+  v.trim();
+  if (v.isEmpty()) return "";
+
+  IPAddress ip;
+  if (!ip.fromString(v)) return "";
+  return ip.toString();
+}
+
+void updateKvmUdpBinding();
 
 IPAddress extractClientIp(AsyncWebServerRequest *request) {
   if (request->hasHeader("X-Forwarded-For")) {
@@ -405,8 +556,35 @@ String sanitizeScriptName(const String &rawName) {
   return name;
 }
 
+String sanitizeActionName(const String &rawName) {
+  String name = rawName;
+  name.trim();
+  name.replace("\\", "/");
+
+  if (name.startsWith("/")) name = name.substring(1);
+  if (name.startsWith("actions/")) name = name.substring(8);
+
+  if (name.isEmpty() || name.length() > 64) return "";
+  if (name.indexOf("..") >= 0) return "";
+
+  for (size_t i = 0; i < name.length(); i++) {
+    char c = name[i];
+    bool ok = (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') ||
+              c == '_' || c == '-' || c == '.' || c == ' ';
+    if (!ok) return "";
+  }
+
+  return name;
+}
+
 String scriptPathFromName(const String &safeName) {
   return String(SCRIPTS_DIR) + "/" + safeName;
+}
+
+String actionPathFromName(const String &safeName) {
+  return String(ACTIONS_DIR) + "/" + safeName;
 }
 
 bool ensureScriptDir() {
@@ -414,8 +592,13 @@ bool ensureScriptDir() {
   return LittleFS.mkdir(SCRIPTS_DIR);
 }
 
+bool ensureActionsDir() {
+  if (LittleFS.exists(ACTIONS_DIR)) return true;
+  return LittleFS.mkdir(ACTIONS_DIR);
+}
+
 void persistSettings() {
-  DynamicJsonDocument out(1536);
+  DynamicJsonDocument out(2304);
   out["ap_ssid"] = ap_ssid;
   out["ap_pass"] = ap_pass;
   out["sta_ssid"] = sta_ssid;
@@ -426,6 +609,15 @@ void persistSettings() {
   out["login_rate_limit"] = loginRateLimitEnabled;
   out["proxy_auth_enabled"] = proxyAuthEnabled;
   out["proxy_auth_token"] = proxyAuthToken;
+
+  out["kvm_enabled"] = kvmEnabled;
+  out["kvm_port"] = kvmPort;
+  out["kvm_allowed_ip"] = kvmAllowedIp;
+
+  out["usb_vid"] = usbVendorId;
+  out["usb_pid"] = usbProductId;
+  out["usb_vendor_name"] = usbVendorName;
+  out["usb_product_name"] = usbProductName;
 
   out["delay"] = typeDelay;
   out["burst_chars"] = burstChars;
@@ -455,7 +647,7 @@ void loadSettings() {
     return;
   }
 
-  DynamicJsonDocument doc(1536);
+  DynamicJsonDocument doc(2304);
   DeserializationError err = deserializeJson(doc, file);
   file.close();
 
@@ -475,6 +667,29 @@ void loadSettings() {
   proxyAuthEnabled = doc["proxy_auth_enabled"] | proxyAuthEnabled;
   if (doc.containsKey("proxy_auth_token")) proxyAuthToken = doc["proxy_auth_token"].as<String>();
 
+  if (doc.containsKey("kvm_enabled")) kvmEnabled = doc["kvm_enabled"].as<bool>();
+  kvmPort = static_cast<uint16_t>(clampInt(doc["kvm_port"] | static_cast<int>(kvmPort), 1, 65535));
+  if (doc.containsKey("kvm_allowed_ip")) kvmAllowedIp = doc["kvm_allowed_ip"].as<String>();
+  kvmAllowedIp = normalizeOptionalIp(kvmAllowedIp);
+
+  if (doc.containsKey("usb_vid")) {
+    uint16_t parsed = usbVendorId;
+    if (parseUint16JsonValue(doc["usb_vid"], parsed)) usbVendorId = parsed;
+  }
+  if (doc.containsKey("usb_pid")) {
+    uint16_t parsed = usbProductId;
+    if (parseUint16JsonValue(doc["usb_pid"], parsed)) usbProductId = parsed;
+  }
+  if (doc.containsKey("usb_vendor_name")) usbVendorName = doc["usb_vendor_name"].as<String>();
+  if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
+
+  usbVendorName.trim();
+  usbProductName.trim();
+  if (usbVendorName.isEmpty()) usbVendorName = "Espressif";
+  if (usbProductName.isEmpty()) usbProductName = "ESP32-S3 HID Console";
+  if (usbVendorName.length() > 48) usbVendorName = usbVendorName.substring(0, 48);
+  if (usbProductName.length() > 48) usbProductName = usbProductName.substring(0, 48);
+
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
   burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
@@ -487,10 +702,17 @@ void loadSettings() {
   pixels.setBrightness(ledBrightness);
 }
 
-void applySettingsJson(const String &jsonBody) {
-  DynamicJsonDocument doc(1536);
+bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
+  usbIdentityChanged = false;
+
+  DynamicJsonDocument doc(2304);
   DeserializationError err = deserializeJson(doc, jsonBody);
-  if (err) return;
+  if (err) return false;
+
+  uint16_t oldUsbVid = usbVendorId;
+  uint16_t oldUsbPid = usbProductId;
+  String oldUsbVendorName = usbVendorName;
+  String oldUsbProductName = usbProductName;
 
   if (doc.containsKey("ap_ssid")) ap_ssid = doc["ap_ssid"].as<String>();
   if (doc.containsKey("ap_pass")) {
@@ -529,6 +751,39 @@ void applySettingsJson(const String &jsonBody) {
     proxyAuthEnabled = enabled && (proxyAuthToken.length() >= 16);
   }
 
+  if (doc.containsKey("kvm_enabled")) kvmEnabled = doc["kvm_enabled"].as<bool>();
+  if (doc.containsKey("kvm_port")) {
+    uint16_t parsedPort = kvmPort;
+    if (parseUint16JsonValue(doc["kvm_port"], parsedPort)) {
+      kvmPort = static_cast<uint16_t>(clampInt(parsedPort, 1, 65535));
+    }
+  }
+  if (doc.containsKey("kvm_allowed_ip")) {
+    String parsedIp = doc["kvm_allowed_ip"].as<String>();
+    kvmAllowedIp = normalizeOptionalIp(parsedIp);
+  }
+
+  if (doc.containsKey("usb_vid")) {
+    uint16_t parsed = usbVendorId;
+    if (parseUint16JsonValue(doc["usb_vid"], parsed)) usbVendorId = parsed;
+  }
+  if (doc.containsKey("usb_pid")) {
+    uint16_t parsed = usbProductId;
+    if (parseUint16JsonValue(doc["usb_pid"], parsed)) usbProductId = parsed;
+  }
+
+  if (doc.containsKey("usb_vendor_name")) {
+    String v = doc["usb_vendor_name"].as<String>();
+    v.trim();
+    if (v.length() >= 1 && v.length() <= 48) usbVendorName = v;
+  }
+
+  if (doc.containsKey("usb_product_name")) {
+    String v = doc["usb_product_name"].as<String>();
+    v.trim();
+    if (v.length() >= 1 && v.length() <= 48) usbProductName = v;
+  }
+
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
   burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
@@ -537,6 +792,16 @@ void applySettingsJson(const String &jsonBody) {
 
   pixels.setBrightness(ledBrightness);
   persistSettings();
+
+  updateKvmUdpBinding();
+
+  usbIdentityChanged =
+    (oldUsbVid != usbVendorId) ||
+    (oldUsbPid != usbProductId) ||
+    (oldUsbVendorName != usbVendorName) ||
+    (oldUsbProductName != usbProductName);
+
+  return true;
 }
 
 void keyboardTap(uint8_t keyCode, uint16_t holdMs = 35) {
@@ -561,10 +826,28 @@ bool queueHidEvent(const HidRealtimeEvent &event, TickType_t timeoutTicks = 0) {
   return xQueueSend(hidEventQueue, &event, timeoutTicks) == pdPASS;
 }
 
+void queueHidReleaseAll() {
+  HidRealtimeEvent keyEvent = {};
+  keyEvent.type = HidRealtimeType::KeyReleaseAll;
+  queueHidEvent(keyEvent, pdMS_TO_TICKS(20));
+
+  HidRealtimeEvent mouseEvent = {};
+  mouseEvent.type = HidRealtimeType::MouseButton;
+  mouseEvent.mouseButton = MOUSE_ALL;
+  mouseEvent.mouseAction = MOUSE_ACTION_UP;
+  queueHidEvent(mouseEvent, pdMS_TO_TICKS(20));
+
+  HidRealtimeEvent consumerEvent = {};
+  consumerEvent.type = HidRealtimeType::ConsumerControl;
+  consumerEvent.consumerUsage = 0;
+  queueHidEvent(consumerEvent, pdMS_TO_TICKS(20));
+}
+
 void hidRealtimeTask(void *parameter) {
   (void)parameter;
 
   HidRealtimeEvent event;
+  uint8_t kvmButtons = 0;
   for (;;) {
     if (xQueueReceive(hidEventQueue, &event, portMAX_DELAY) != pdTRUE) continue;
 
@@ -580,6 +863,9 @@ void hidRealtimeTask(void *parameter) {
         break;
       case HidRealtimeType::KeyReleaseAll:
         Keyboard.releaseAll();
+        Mouse.release(MOUSE_ALL);
+        Consumer.release();
+        kvmButtons = 0;
         break;
       case HidRealtimeType::Combo:
         keyboardCombo(event.ctrl, event.alt, event.shift, event.gui, event.keyCode, event.holdMs);
@@ -597,6 +883,52 @@ void hidRealtimeTask(void *parameter) {
           Mouse.release(event.mouseButton);
         } else {
           Mouse.click(event.mouseButton);
+        }
+        break;
+      case HidRealtimeType::KvmKeyboardState: {
+        KeyReport report = {};
+        report.modifiers = event.kvmModifiers;
+        memcpy(report.keys, event.kvmKeys, sizeof(report.keys));
+        Keyboard.sendReport(&report);
+      } break;
+      case HidRealtimeType::KvmMouseState: {
+        uint8_t changed = kvmButtons ^ event.kvmButtons;
+        if (changed != 0) {
+          uint8_t pressedMask = changed & event.kvmButtons;
+          uint8_t releasedMask = changed & static_cast<uint8_t>(~event.kvmButtons);
+
+          if (pressedMask) Mouse.press(pressedMask);
+          if (releasedMask) Mouse.release(releasedMask);
+
+          kvmButtons = event.kvmButtons;
+        }
+
+        int16_t dx = event.kvmDx;
+        int16_t dy = event.kvmDy;
+
+        while (dx != 0 || dy != 0) {
+          int8_t stepX = clampInt8(dx, -120, 120);
+          int8_t stepY = clampInt8(dy, -120, 120);
+          Mouse.move(stepX, stepY, 0, 0);
+
+          dx -= stepX;
+          dy -= stepY;
+
+          if (dx != 0 || dy != 0) {
+            vTaskDelay(1);
+          }
+        }
+
+        if (event.kvmWheel != 0 || event.kvmPan != 0) {
+          Mouse.move(0, 0, event.kvmWheel, event.kvmPan);
+        }
+      } break;
+      case HidRealtimeType::ConsumerControl:
+        if (event.consumerUsage == 0) {
+          Consumer.release();
+        } else {
+          Consumer.press(event.consumerUsage);
+          Consumer.release();
         }
         break;
       default:
@@ -786,12 +1118,196 @@ bool queueJob(size_t length, bool isRawText) {
   if (length == 0 || length >= BUFFER_SIZE) return false;
   if (isWorkerBusy || isJobQueued) return false;
 
-  DuckyJob job = { length, isRawText };
+  DuckyJob job = {};
+  job.type = isRawText ? JOB_RAW_TEXT : JOB_SCRIPT;
+  job.length = length;
+  job.fileName[0] = '\0';
+
   if (xQueueSend(jobQueue, &job, 0) == pdPASS) {
     isJobQueued = true;
     return true;
   }
   return false;
+}
+
+bool queueActionFileJob(const String &safeName) {
+  if (safeName.isEmpty()) return false;
+  if (isWorkerBusy || isJobQueued) return false;
+
+  DuckyJob job = {};
+  job.type = JOB_ACTION_FILE;
+  job.length = 0;
+  safeName.toCharArray(job.fileName, sizeof(job.fileName));
+
+  if (xQueueSend(jobQueue, &job, 0) == pdPASS) {
+    isJobQueued = true;
+    return true;
+  }
+  return false;
+}
+
+int splitPipe(const String &line, String parts[], int maxParts) {
+  if (maxParts <= 0) return 0;
+
+  int count = 0;
+  int start = 0;
+
+  while (count < maxParts) {
+    if (count == maxParts - 1) {
+      parts[count++] = line.substring(start);
+      break;
+    }
+
+    int sep = line.indexOf('|', start);
+    if (sep < 0) {
+      parts[count++] = line.substring(start);
+      break;
+    }
+
+    parts[count++] = line.substring(start, sep);
+    start = sep + 1;
+  }
+
+  for (int i = 0; i < count; i++) {
+    parts[i].trim();
+  }
+
+  return count;
+}
+
+void delayWithStop(uint32_t ms) {
+  if (ms == 0) return;
+
+  uint32_t start = millis();
+  while (!stopScriptFlag && (millis() - start < ms)) {
+    delay(1);
+  }
+}
+
+uint8_t parseActionMouseButtonToken(const String &token) {
+  String lowered = token;
+  lowered.toLowerCase();
+  lowered.trim();
+
+  if (lowered == "left") return MOUSE_LEFT;
+  if (lowered == "right") return MOUSE_RIGHT;
+  if (lowered == "middle") return MOUSE_MIDDLE;
+  if (lowered == "backward" || lowered == "back") return MOUSE_BACKWARD;
+  if (lowered == "forward") return MOUSE_FORWARD;
+
+  int numeric = lowered.toInt();
+  if (numeric >= 1 && numeric <= 31) return static_cast<uint8_t>(numeric);
+  return MOUSE_LEFT;
+}
+
+uint8_t parseActionMouseActionToken(const String &token) {
+  String lowered = token;
+  lowered.toLowerCase();
+  lowered.trim();
+
+  if (lowered == "down") return MOUSE_ACTION_DOWN;
+  if (lowered == "up") return MOUSE_ACTION_UP;
+  if (lowered == "click") return MOUSE_ACTION_CLICK;
+
+  int numeric = lowered.toInt();
+  if (numeric == 1) return MOUSE_ACTION_DOWN;
+  if (numeric == 2) return MOUSE_ACTION_UP;
+  return MOUSE_ACTION_CLICK;
+}
+
+void replayMouseDelta(int dx, int dy) {
+  int remX = dx;
+  int remY = dy;
+
+  while (!stopScriptFlag && (remX != 0 || remY != 0)) {
+    int8_t stepX = clampInt8(remX, -120, 120);
+    int8_t stepY = clampInt8(remY, -120, 120);
+    Mouse.move(stepX, stepY, 0, 0);
+    remX -= stepX;
+    remY -= stepY;
+
+    if (remX != 0 || remY != 0) {
+      delay(1);
+    }
+  }
+}
+
+bool runActionFile(const String &safeName) {
+  String filePath = actionPathFromName(safeName);
+  if (!LittleFS.exists(filePath)) return false;
+
+  File file = LittleFS.open(filePath, "r");
+  if (!file) return false;
+
+  while (file.available() && !stopScriptFlag) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    if (line.isEmpty() || line.startsWith("#")) continue;
+
+    String parts[8];
+    int count = splitPipe(line, parts, 8);
+    if (count < 2) continue;
+
+    int delayMs = clampInt(parts[0].toInt(), 0, 60000);
+    if (delayMs > 0) delayWithStop(static_cast<uint32_t>(delayMs));
+    if (stopScriptFlag) break;
+
+    String event = parts[1];
+    event.toLowerCase();
+
+    if (event == "key_tap" && count >= 4) {
+      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
+      uint16_t hold = static_cast<uint16_t>(clampInt(parts[3].toInt(), 10, 300));
+      keyboardTap(code, hold);
+    } else if (event == "key_down" && count >= 3) {
+      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
+      Keyboard.press(code);
+    } else if (event == "key_up" && count >= 3) {
+      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
+      Keyboard.release(code);
+    } else if (event == "key_release_all") {
+      Keyboard.releaseAll();
+    } else if (event == "combo" && count >= 5) {
+      int flags = clampInt(parts[2].toInt(), 0, 15);
+      uint8_t code = static_cast<uint8_t>(clampInt(parts[3].toInt(), 0, 255));
+      uint16_t hold = static_cast<uint16_t>(clampInt(parts[4].toInt(), 10, 300));
+
+      keyboardCombo((flags & 0x1) != 0, (flags & 0x2) != 0, (flags & 0x4) != 0, (flags & 0x8) != 0, code, hold);
+    } else if (event == "mouse_move" && count >= 4) {
+      int dx = clampInt(parts[2].toInt(), -4096, 4096);
+      int dy = clampInt(parts[3].toInt(), -4096, 4096);
+      replayMouseDelta(dx, dy);
+    } else if (event == "mouse_scroll" && count >= 4) {
+      int wheel = clampInt(parts[2].toInt(), -127, 127);
+      int pan = clampInt(parts[3].toInt(), -127, 127);
+      Mouse.move(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
+    } else if (event == "mouse_button" && count >= 4) {
+      uint8_t button = parseActionMouseButtonToken(parts[2]);
+      uint8_t action = parseActionMouseActionToken(parts[3]);
+      if (action == MOUSE_ACTION_DOWN) {
+        Mouse.press(button);
+      } else if (action == MOUSE_ACTION_UP) {
+        Mouse.release(button);
+      } else {
+        Mouse.click(button);
+      }
+    } else if (event == "consumer" && count >= 3) {
+      uint16_t usage = static_cast<uint16_t>(clampInt(parts[2].toInt(), 0, 0xFFFF));
+      if (usage == 0) {
+        Consumer.release();
+      } else {
+        Consumer.press(usage);
+        Consumer.release();
+      }
+    }
+  }
+
+  file.close();
+  Keyboard.releaseAll();
+  Mouse.release(MOUSE_ALL);
+  Consumer.release();
+  return true;
 }
 
 void duckyWorkerTask(void *parameter) {
@@ -807,13 +1323,18 @@ void duckyWorkerTask(void *parameter) {
       setStatus(0, 0, 255); // Blue
       vTaskDelay(pdMS_TO_TICKS(80));
 
-      if (job.isRawText) {
+      if (job.type == JOB_RAW_TEXT) {
         typeTextInternal(0, job.length);
+      } else if (job.type == JOB_ACTION_FILE) {
+        String safeName = String(job.fileName);
+        runActionFile(safeName);
       } else {
         parseAndExecuteInternal(job.length);
       }
 
       Keyboard.releaseAll();
+      Mouse.release(MOUSE_ALL);
+      Consumer.release();
       setStatus(255, 255, 255); // White
       vTaskDelay(pdMS_TO_TICKS(120));
       setStatus(0, 255, 0); // Green
@@ -821,6 +1342,144 @@ void duckyWorkerTask(void *parameter) {
       stopScriptFlag = false;
       isWorkerBusy = false;
     }
+  }
+}
+
+bool isKvmSourceAllowed(const IPAddress &ip) {
+  if (kvmAllowedIp.isEmpty()) return true;
+
+  IPAddress allowed;
+  if (!allowed.fromString(kvmAllowedIp)) return true;
+  return ip == allowed;
+}
+
+void updateKvmUdpBinding() {
+  if (!kvmEnabled) {
+    if (kvmUdpBound) {
+      kvmUdp.stop();
+      kvmUdpBound = false;
+      kvmBoundPort = 0;
+      kvmHasSequence = false;
+    }
+    return;
+  }
+
+  uint16_t desiredPort = static_cast<uint16_t>(clampInt(kvmPort, 1, 65535));
+  if (kvmUdpBound && kvmBoundPort == desiredPort) return;
+
+  if (kvmUdpBound) {
+    kvmUdp.stop();
+    kvmUdpBound = false;
+    kvmBoundPort = 0;
+    delay(5);
+  }
+
+  kvmUdpBound = kvmUdp.begin(desiredPort);
+  if (kvmUdpBound) {
+    kvmBoundPort = desiredPort;
+    kvmHasSequence = false;
+  }
+}
+
+void kvmNetworkTask(void *parameter) {
+  (void)parameter;
+
+  uint8_t packetBuffer[KVM_PACKET_SIZE];
+
+  for (;;) {
+    if (!kvmEnabled) {
+      vTaskDelay(pdMS_TO_TICKS(120));
+      continue;
+    }
+
+    if (!kvmUdpBound) {
+      updateKvmUdpBinding();
+      vTaskDelay(pdMS_TO_TICKS(80));
+      continue;
+    }
+
+    int packetSize = kvmUdp.parsePacket();
+    if (packetSize <= 0) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+
+    IPAddress sourceIp = kvmUdp.remoteIP();
+    int bytesRead = kvmUdp.read(packetBuffer, KVM_PACKET_SIZE);
+    while (kvmUdp.available() > 0) {
+      kvmUdp.read();
+    }
+
+    if (packetSize != static_cast<int>(KVM_PACKET_SIZE) || bytesRead != static_cast<int>(KVM_PACKET_SIZE)) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    KvmPacket packet = {};
+    memcpy(&packet, packetBuffer, sizeof(packet));
+
+    if (packet.magic != KVM_PACKET_MAGIC) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    if (!isKvmSourceAllowed(sourceIp)) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    if (kvmHasSequence) {
+      int32_t delta = static_cast<int32_t>(packet.sequence - kvmLastSequence);
+      if (delta <= 0) {
+        kvmPacketsDropped++;
+        continue;
+      }
+    }
+
+    kvmHasSequence = true;
+    kvmLastSequence = packet.sequence;
+    kvmLastSourceIp = sourceIp;
+    kvmLastPacketMs = millis();
+    kvmPacketsRx++;
+
+    if (isWorkerBusy || isJobQueued) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    HidRealtimeEvent event = {};
+    bool valid = true;
+
+    if (packet.type == KVM_EVENT_MOUSE) {
+      event.type = HidRealtimeType::KvmMouseState;
+      event.kvmButtons = packet.payload.mouse.buttons & MOUSE_ALL;
+      event.kvmDx = packet.payload.mouse.dx;
+      event.kvmDy = packet.payload.mouse.dy;
+      event.kvmWheel = packet.payload.mouse.wheel;
+      event.kvmPan = packet.payload.mouse.pan;
+    } else if (packet.type == KVM_EVENT_KEYBOARD) {
+      event.type = HidRealtimeType::KvmKeyboardState;
+      event.kvmModifiers = packet.payload.keyboard.modifiers;
+      memcpy(event.kvmKeys, packet.payload.keyboard.keycodes, sizeof(event.kvmKeys));
+    } else if (packet.type == KVM_EVENT_CONSUMER) {
+      event.type = HidRealtimeType::ConsumerControl;
+      event.consumerUsage = packet.payload.consumer.usageId;
+    } else {
+      valid = false;
+    }
+
+    if (!valid) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    bool queued = queueHidEvent(event, 0);
+    if (!queued) {
+      kvmPacketsDropped++;
+      continue;
+    }
+
+    kvmPacketsEnqueued++;
   }
 }
 
@@ -951,12 +1610,23 @@ uint8_t parseMouseButton(const String &name) {
   if (lowered == "left") return MOUSE_LEFT;
   if (lowered == "right") return MOUSE_RIGHT;
   if (lowered == "middle") return MOUSE_MIDDLE;
+  if (lowered == "backward" || lowered == "back") return MOUSE_BACKWARD;
+  if (lowered == "forward") return MOUSE_FORWARD;
   return 0;
 }
 
 void registerRoutes() {
   server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("max-age=300");
   server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("max-age=300");
+
+  server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/favicon.ico")) {
+      request->send(LittleFS, "/favicon.ico", "image/x-icon");
+      return;
+    }
+
+    request->send(204, "text/plain", "");
+  });
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!uiFilesPresent()) {
@@ -1093,6 +1763,111 @@ void registerRoutes() {
     if (!requireAuth(request)) return;
     request->send(200, "application/json", jsonStatus());
   });
+
+  server.on("/api/hid_release_all", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    queueHidReleaseAll();
+    request->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/kvm_status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    String deviceIp = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+    uint32_t now = millis();
+    uint32_t packetAgeMs = (kvmLastPacketMs == 0) ? 0xFFFFFFFF : (now - kvmLastPacketMs);
+
+    String linkState = "disabled";
+    bool connected = false;
+    if (kvmEnabled) {
+      if (!kvmUdpBound) {
+        linkState = "not-bound";
+      } else if (kvmLastPacketMs == 0) {
+        linkState = "waiting";
+      } else if (packetAgeMs < 2500) {
+        linkState = "connected";
+        connected = true;
+      } else {
+        linkState = "stale";
+      }
+    }
+
+    String json = "{";
+    json += "\"enabled\":" + String(kvmEnabled ? "true" : "false");
+    json += ",\"bound\":" + String(kvmUdpBound ? "true" : "false");
+    json += ",\"connected\":" + String(connected ? "true" : "false");
+    json += ",\"link_state\":\"" + linkState + "\"";
+    json += ",\"port\":" + String(kvmPort);
+    json += ",\"allowed_ip\":\"" + kvmAllowedIp + "\"";
+    json += ",\"packets_rx\":" + String(kvmPacketsRx);
+    json += ",\"packets_dropped\":" + String(kvmPacketsDropped);
+    json += ",\"packets_enqueued\":" + String(kvmPacketsEnqueued);
+    json += ",\"last_sequence\":" + String(kvmHasSequence ? kvmLastSequence : 0);
+    json += ",\"last_source_ip\":\"" + kvmLastSourceIp.toString() + "\"";
+    json += ",\"last_packet_ms\":" + String(kvmLastPacketMs);
+    json += ",\"packet_age_ms\":" + String(packetAgeMs);
+    json += ",\"device_ip\":\"" + deviceIp + "\"";
+    json += "}";
+
+    request->send(200, "application/json", json);
+  });
+
+  server.on(
+    "/api/kvm_config",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+
+      if (index == 0) request->_tempObject = new String();
+      String *body = reinterpret_cast<String *>(request->_tempObject);
+
+      if (!body) {
+        request->send(500, "application/json", "{\"error\":\"alloc-failed\"}");
+        return;
+      }
+
+      for (size_t i = 0; i < len; i++) {
+        body->concat(static_cast<char>(data[i]));
+      }
+
+      if (index + len == total) {
+        DynamicJsonDocument doc(512);
+        DeserializationError err = deserializeJson(doc, *body);
+
+        delete body;
+        request->_tempObject = nullptr;
+
+        if (err) {
+          request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+          return;
+        }
+
+        if (doc.containsKey("enabled")) kvmEnabled = doc["enabled"].as<bool>();
+
+        if (doc.containsKey("port")) {
+          uint16_t parsedPort = kvmPort;
+          if (parseUint16JsonValue(doc["port"], parsedPort)) {
+            kvmPort = static_cast<uint16_t>(clampInt(parsedPort, 1, 65535));
+          }
+        }
+
+        if (doc.containsKey("allowed_ip")) {
+          String ip = doc["allowed_ip"].as<String>();
+          kvmAllowedIp = normalizeOptionalIp(ip);
+        }
+
+        persistSettings();
+        updateKvmUdpBinding();
+
+        request->send(200, "application/json", "{\"saved\":true}");
+      }
+    }
+  );
 
   server.on("/api/proxy_profile", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
@@ -1456,6 +2231,162 @@ void registerRoutes() {
     request->send(200, "application/json", json);
   });
 
+  server.on("/api/action_files", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    File root = LittleFS.open(ACTIONS_DIR);
+    if (!root || !root.isDirectory()) {
+      request->send(200, "application/json", "[]");
+      return;
+    }
+
+    String json = "[";
+    File f = root.openNextFile();
+    while (f) {
+      if (!f.isDirectory()) {
+        String fullName = String(f.name());
+        String shortName = fullName;
+        if (shortName.startsWith("/actions/")) shortName = shortName.substring(9);
+
+        if (!json.endsWith("[")) json += ",";
+        json += "{\"name\":\"" + shortName + "\",\"size\":" + String(f.size()) + "}";
+      }
+      f = root.openNextFile();
+    }
+    json += "]";
+
+    request->send(200, "application/json", json);
+  });
+
+  server.on("/api/action_file/load", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    if (!request->hasParam("name")) {
+      request->send(400, "application/json", "{\"error\":\"missing-name\"}");
+      return;
+    }
+
+    String safeName = sanitizeActionName(request->getParam("name")->value());
+    if (safeName.isEmpty()) {
+      request->send(400, "application/json", "{\"error\":\"invalid-name\"}");
+      return;
+    }
+
+    String filePath = actionPathFromName(safeName);
+    if (!LittleFS.exists(filePath)) {
+      request->send(404, "application/json", "{\"error\":\"not-found\"}");
+      return;
+    }
+
+    request->send(LittleFS, filePath, "text/plain");
+  });
+
+  server.on("/api/action_file/delete", HTTP_DELETE, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    if (!request->hasParam("name")) {
+      request->send(400, "application/json", "{\"error\":\"missing-name\"}");
+      return;
+    }
+
+    String safeName = sanitizeActionName(request->getParam("name")->value());
+    if (safeName.isEmpty()) {
+      request->send(400, "application/json", "{\"error\":\"invalid-name\"}");
+      return;
+    }
+
+    String filePath = actionPathFromName(safeName);
+    bool removed = LittleFS.exists(filePath) ? LittleFS.remove(filePath) : false;
+
+    request->send(200, "application/json", removed ? "{\"deleted\":true}" : "{\"deleted\":false}");
+  });
+
+  server.on("/api/action_file/run", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+
+    if (!request->hasParam("name")) {
+      request->send(400, "application/json", "{\"error\":\"missing-name\"}");
+      return;
+    }
+
+    String safeName = sanitizeActionName(request->getParam("name")->value());
+    if (safeName.isEmpty()) {
+      request->send(400, "application/json", "{\"error\":\"invalid-name\"}");
+      return;
+    }
+
+    String filePath = actionPathFromName(safeName);
+    if (!LittleFS.exists(filePath)) {
+      request->send(404, "application/json", "{\"error\":\"not-found\"}");
+      return;
+    }
+
+    bool queued = queueActionFileJob(safeName);
+    if (!queued) {
+      request->send(503, "application/json", "{\"error\":\"busy\"}");
+      return;
+    }
+
+    request->send(200, "application/json", "{\"queued\":true}");
+  });
+
+  server.on(
+    "/api/action_file/save",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+
+      constexpr uintptr_t STATE_OK = 0;
+      constexpr uintptr_t STATE_BAD_NAME = 1;
+      constexpr uintptr_t STATE_FILE_OPEN_FAIL = 2;
+      constexpr uintptr_t STATE_TOO_LARGE = 3;
+
+      if (index == 0) {
+        if (!request->hasParam("name")) {
+          request->_tempObject = reinterpret_cast<void *>(STATE_BAD_NAME);
+        } else if (total > ACTION_FILE_MAX_SIZE) {
+          request->_tempObject = reinterpret_cast<void *>(STATE_TOO_LARGE);
+        } else {
+          String safeName = sanitizeActionName(request->getParam("name")->value());
+          if (safeName.isEmpty()) {
+            request->_tempObject = reinterpret_cast<void *>(STATE_BAD_NAME);
+          } else {
+            String filePath = actionPathFromName(safeName);
+            request->_tempFile = LittleFS.open(filePath, "w");
+            if (!request->_tempFile) {
+              request->_tempObject = reinterpret_cast<void *>(STATE_FILE_OPEN_FAIL);
+            } else {
+              request->_tempObject = reinterpret_cast<void *>(STATE_OK);
+            }
+          }
+        }
+      }
+
+      uintptr_t state = reinterpret_cast<uintptr_t>(request->_tempObject);
+      if (state == STATE_OK && request->_tempFile) {
+        request->_tempFile.write(data, len);
+      }
+
+      if (index + len == total) {
+        if (request->_tempFile) request->_tempFile.close();
+
+        if (state == STATE_BAD_NAME) {
+          request->send(400, "application/json", "{\"error\":\"invalid-name\"}");
+        } else if (state == STATE_TOO_LARGE) {
+          request->send(413, "application/json", "{\"error\":\"file-too-large\"}");
+        } else if (state == STATE_FILE_OPEN_FAIL) {
+          request->send(500, "application/json", "{\"error\":\"save-failed\"}");
+        } else {
+          request->send(200, "application/json", "{\"saved\":true}");
+        }
+      }
+    }
+  );
+
   server.on("/api/load", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
 
@@ -1527,7 +2458,7 @@ void registerRoutes() {
   server.on("/api/get_settings", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
 
-    DynamicJsonDocument doc(1536);
+    DynamicJsonDocument doc(2304);
     doc["ap_ssid"] = ap_ssid;
     doc["ap_pass"] = ap_pass;
     doc["sta_ssid"] = sta_ssid;
@@ -1537,6 +2468,15 @@ void registerRoutes() {
     doc["login_rate_limit"] = loginRateLimitEnabled;
     doc["proxy_auth_enabled"] = proxyAuthEnabled;
     doc["proxy_auth_token"] = proxyAuthToken;
+
+    doc["kvm_enabled"] = kvmEnabled;
+    doc["kvm_port"] = kvmPort;
+    doc["kvm_allowed_ip"] = kvmAllowedIp;
+
+    doc["usb_vid"] = usbVendorId;
+    doc["usb_pid"] = usbProductId;
+    doc["usb_vendor_name"] = usbVendorName;
+    doc["usb_product_name"] = usbProductName;
 
     doc["delay"] = typeDelay;
     doc["burst_chars"] = burstChars;
@@ -1572,12 +2512,22 @@ void registerRoutes() {
       }
 
       if (index + len == total) {
-        applySettingsJson(*body);
+        bool usbIdentityChanged = false;
+        bool parsed = applySettingsJson(*body, usbIdentityChanged);
 
         delete body;
         request->_tempObject = nullptr;
 
-        request->send(200, "application/json", "{\"saved\":true}");
+        if (!parsed) {
+          request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+          return;
+        }
+
+        String response = "{\"saved\":true,\"usb_restart_required\":";
+        response += usbIdentityChanged ? "true" : "false";
+        response += "}";
+
+        request->send(200, "application/json", response);
       }
     }
   );
@@ -1606,6 +2556,9 @@ void setup() {
   if (!ensureScriptDir()) {
     Serial.println("Failed to create /scripts directory");
   }
+  if (!ensureActionsDir()) {
+    Serial.println("Failed to create /actions directory");
+  }
 
   loadSettings();
 
@@ -1616,12 +2569,18 @@ void setup() {
     while (true) delay(1000);
   }
 
+  USB.VID(usbVendorId);
+  USB.PID(usbProductId);
+  USB.manufacturerName(usbVendorName.c_str());
+  USB.productName(usbProductName.c_str());
+
   USB.begin();
   Keyboard.begin();
   Mouse.begin();
+  Consumer.begin();
 
   jobQueue = xQueueCreate(1, sizeof(DuckyJob));
-  hidEventQueue = xQueueCreate(48, sizeof(HidRealtimeEvent));
+  hidEventQueue = xQueueCreate(64, sizeof(HidRealtimeEvent));
   if (!jobQueue || !hidEventQueue) {
     Serial.println("Queue creation failed");
     setStatus(255, 0, 0);
@@ -1630,8 +2589,10 @@ void setup() {
 
   xTaskCreatePinnedToCore(duckyWorkerTask, "DuckyWorker", 16384, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(hidRealtimeTask, "HidRealtime", 8192, nullptr, 2, nullptr, 0);
+  xTaskCreatePinnedToCore(kvmNetworkTask, "KvmNetwork", 8192, nullptr, 2, nullptr, 0);
 
   connectWiFi();
+  updateKvmUdpBinding();
   registerRoutes();
   server.begin();
 
@@ -1641,6 +2602,7 @@ void setup() {
 
 void loop() {
   static uint32_t lastPrune = 0;
+  static uint32_t lastKvmBindRefresh = 0;
 
   if (!activeSessionToken.isEmpty() && isSessionExpired()) {
     clearSession();
@@ -1650,6 +2612,11 @@ void loop() {
   if (now - lastPrune > 30000) {
     pruneLoginSlots();
     lastPrune = now;
+  }
+
+  if (now - lastKvmBindRefresh > 5000) {
+    updateKvmUdpBinding();
+    lastKvmBindRefresh = now;
   }
 
   vTaskDelay(pdMS_TO_TICKS(1000));

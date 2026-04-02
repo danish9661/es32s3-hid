@@ -9,3 +9,7 @@ include/README
 test/README
 lib/README
 .gitignore
+
+# Python cache
+__pycache__/
+*.pyc

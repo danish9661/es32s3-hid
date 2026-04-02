@@ -20,6 +20,7 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="editor">Editor</button>
       <button class="tab-btn" data-tab="remote">Remote</button>
+      <button class="tab-btn" data-tab="kvm">KVM</button>
       <button class="tab-btn" data-tab="keyboard">Keyboard</button>
       <button class="tab-btn" data-tab="mouse">Mouse</button>
       <button class="tab-btn" data-tab="settings">Settings</button>
@@ -67,6 +68,10 @@
             <button class="key" data-action-key="218">Up</button>
             <button class="key" data-action-key="217">Down</button>
             <button class="key" data-action-key="215">Right</button>
+            <button class="key" data-action-combo="ctrl+a">Select All</button>
+            <button class="key" data-action-combo="ctrl+c">Copy</button>
+            <button class="key" data-action-combo="ctrl+x">Cut</button>
+            <button class="key" data-action-combo="ctrl+v">Paste</button>
             <button class="key" data-action-combo="ctrl+z">Undo</button>
             <button class="key" data-action-combo="ctrl+y">Redo</button>
           </div>
@@ -79,6 +84,149 @@
           </div>
           <div id="custom-actions-list" class="remote-grid" style="margin-top:10px;"></div>
           <p class="small">Supported format: ctrl/alt/shift/win + key (example: ctrl+shift+n, alt+tab, win+r)</p>
+
+          <h3 style="margin-top:16px;">Quick Action + Keyboard Preferences Backup</h3>
+          <div class="toolbar">
+            <button id="export-pref-btn" class="btn-outline">Export Preferences</button>
+            <button id="import-pref-btn" class="btn-outline">Import Preferences</button>
+            <input id="import-pref-input" type="file" accept="application/json" class="hidden-input">
+          </div>
+          <p class="small">One-click export/import for custom quick actions and keyboard preferences.</p>
+        </div>
+      </section>
+
+      <section id="view-kvm" class="view">
+        <div class="panel kvm-box">
+          <h2>KVM Bridge (esp32-kvm-ip Compatible)</h2>
+          <p class="small">Receives 16-byte UDP KVM packets (mouse + keyboard + consumer keys) inspired by esp32-kvm-ip. Use your Host sender with this device IP and port.</p>
+
+          <div class="kvm-link-indicator" id="kvm-link-indicator">
+            <span id="kvm-link-dot" class="link-dot"></span>
+            <strong id="kvm-link-state">Status: idle</strong>
+            <span id="kvm-link-age" class="small">Last packet: -</span>
+          </div>
+
+          <div class="settings-grid">
+            <div>
+              <label class="checkbox-row">
+                <input id="kvm-enabled" type="checkbox">
+                <span>Enable KVM UDP Listener</span>
+              </label>
+            </div>
+            <div>
+              <label class="label" for="kvm-port">UDP Port</label>
+              <input class="input" id="kvm-port" type="number" min="1" max="65535" value="4210">
+            </div>
+            <div style="grid-column: 1 / -1;">
+              <label class="label" for="kvm-allowed-ip">Allowed Host IP (optional)</label>
+              <input class="input" id="kvm-allowed-ip" type="text" placeholder="Blank = any source. Example: 192.168.1.50">
+            </div>
+          </div>
+
+          <div class="toolbar" style="margin-top:10px;">
+            <button id="save-kvm-btn" class="btn-primary">Apply KVM Config</button>
+            <button id="refresh-kvm-btn" class="btn-outline">Refresh Status</button>
+            <button id="kvm-release-all-btn" class="btn-outline">Release All HID</button>
+          </div>
+
+          <div class="kvm-stats-grid">
+            <div class="kvm-stat-card">
+              <span class="small">Packets</span>
+              <strong id="kvm-packets-rx">0</strong>
+            </div>
+            <div class="kvm-stat-card">
+              <span class="small">Dropped</span>
+              <strong id="kvm-packets-dropped">0</strong>
+            </div>
+            <div class="kvm-stat-card">
+              <span class="small">Last Seq</span>
+              <strong id="kvm-last-seq">-</strong>
+            </div>
+            <div class="kvm-stat-card">
+              <span class="small">Last Source</span>
+              <strong id="kvm-last-source">-</strong>
+            </div>
+          </div>
+
+          <div id="kvm-status" class="status-line">KVM idle.</div>
+
+          <h3 style="margin-top:16px;">KVM Setup Helper</h3>
+          <p class="small">Use these ready commands on your host computer. Copy and run from project root.</p>
+
+          <div class="helper-grid">
+            <label class="label" for="kvm-cmd-main">Main command (with screenshot preview)</label>
+            <textarea id="kvm-cmd-main" rows="2" readonly></textarea>
+            <button id="copy-kvm-cmd-main" class="btn-outline">Copy Main Command</button>
+
+            <label class="label" for="kvm-cmd-no-preview">Low-overhead command (no preview server)</label>
+            <textarea id="kvm-cmd-no-preview" rows="2" readonly></textarea>
+            <button id="copy-kvm-cmd-no-preview" class="btn-outline">Copy No-Preview Command</button>
+          </div>
+
+          <h3 style="margin-top:16px;">Host Screenshot Preview</h3>
+          <p class="small">Start host server with preview enabled, then load screenshot on demand.</p>
+
+          <div class="settings-grid">
+            <div style="grid-column: 1 / -1;">
+              <label class="label" for="screenshot-url">Screenshot URL</label>
+              <input id="screenshot-url" class="input" type="text" placeholder="http://127.0.0.1:9876/screenshot.bmp">
+            </div>
+            <div>
+              <label class="checkbox-row">
+                <input id="screenshot-auto-refresh" type="checkbox">
+                <span>Auto refresh screenshot</span>
+              </label>
+            </div>
+            <div>
+              <label class="label" for="screenshot-interval-ms">Refresh Interval (ms)</label>
+              <input id="screenshot-interval-ms" class="input" type="number" min="500" max="10000" value="2000">
+            </div>
+          </div>
+
+          <div class="toolbar" style="margin-top:10px;">
+            <button id="load-screenshot-btn" class="btn-primary">Load Screenshot</button>
+            <button id="open-screenshot-url-btn" class="btn-outline">Open URL</button>
+          </div>
+
+          <div class="screenshot-frame">
+            <img id="screenshot-image" alt="Host screenshot preview">
+          </div>
+          <div id="screenshot-status" class="status-line">Screenshot idle.</div>
+
+          <h3 style="margin-top:16px;">Record Keyboard + Mouse Actions</h3>
+          <p class="small">Records actions sent from this UI into a replay file you can store on ESP32 and run later for exact playback.</p>
+
+          <div class="toolbar">
+            <button id="record-start-btn" class="btn-primary">Start Recording</button>
+            <button id="record-stop-btn" class="btn-outline">Stop</button>
+            <button id="record-clear-btn" class="btn-outline">Clear</button>
+            <button id="record-download-btn" class="btn-outline">Download File</button>
+          </div>
+
+          <div class="settings-grid">
+            <div>
+              <label class="label" for="record-file-name">Action File Name</label>
+              <input class="input" id="record-file-name" type="text" placeholder="session-action.txt">
+            </div>
+            <div>
+              <label class="label" for="action-files-select">Stored Action Files</label>
+              <select id="action-files-select" class="input"></select>
+            </div>
+          </div>
+
+          <div class="toolbar" style="margin-top:10px;">
+            <button id="record-save-device-btn" class="btn-primary">Save Recording To ESP</button>
+            <button id="action-run-btn">Run Selected File</button>
+            <button id="action-delete-btn" class="btn-danger">Delete Selected File</button>
+            <button id="action-refresh-btn" class="btn-outline">Refresh File List</button>
+          </div>
+
+          <div class="toolbar">
+            <button id="action-import-btn" class="btn-outline">Import Action File To ESP</button>
+            <input id="action-import-input" type="file" accept=".txt,.krec,.log,text/plain" class="hidden-input">
+          </div>
+
+          <div id="record-status" class="status-line">Recorder idle.</div>
         </div>
       </section>
 
@@ -96,6 +244,27 @@
           </div>
 
           <div id="keyboard-65" class="keyboard-65"></div>
+          <h3 style="margin-top:16px;">Keyboard Preferences</h3>
+          <div class="settings-grid">
+            <div>
+              <label class="label" for="kbd-pref-tap-hold">Quick Key Tap Hold (ms)</label>
+              <input id="kbd-pref-tap-hold" type="range" min="10" max="180" step="1">
+              <div id="kbd-pref-tap-hold-value" class="slider-value">35 ms</div>
+            </div>
+            <div>
+              <label class="label" for="kbd-pref-combo-hold">Combo Hold (ms)</label>
+              <input id="kbd-pref-combo-hold" type="range" min="10" max="220" step="1">
+              <div id="kbd-pref-combo-hold-value" class="slider-value">45 ms</div>
+            </div>
+            <div style="grid-column: 1 / -1;">
+              <label class="checkbox-row">
+                <input id="kbd-pref-auto-release" type="checkbox">
+                <span>Release all keys automatically when leaving Keyboard tab</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="kbd-pref-status" class="status-line">Keyboard preferences ready.</div>
           <div id="keyboard-status" class="status-line">Keyboard ready.</div>
         </div>
       </section>
@@ -216,6 +385,38 @@
               <p class="small">Use this token in header X-Proxy-Token on your HTTPS reverse proxy.</p>
             </div>
           </div>
+
+          <h3 style="margin-top:16px;">USB Identity (Applied After Reboot)</h3>
+          <div class="settings-grid">
+            <div>
+              <label class="label" for="usb-vendor-preset">Vendor Preset</label>
+              <select class="input" id="usb-vendor-preset">
+                <option value="custom">Custom</option>
+                <option value="espressif">Espressif (0x303A)</option>
+                <option value="arduino">Arduino SA (0x2341)</option>
+                <option value="adafruit">Adafruit (0x239A)</option>
+                <option value="logitech">Logitech (0x046D)</option>
+                <option value="microsoft">Microsoft (0x045E)</option>
+              </select>
+            </div>
+            <div>
+              <label class="label" for="usb-vendor-name">USB Vendor Name</label>
+              <input class="input" id="usb-vendor-name" type="text" placeholder="Example: Espressif">
+            </div>
+            <div>
+              <label class="label" for="usb-vendor-id">USB Vendor ID (hex)</label>
+              <input class="input" id="usb-vendor-id" type="text" placeholder="0x303A">
+            </div>
+            <div>
+              <label class="label" for="usb-product-id">USB Product ID (hex)</label>
+              <input class="input" id="usb-product-id" type="text" placeholder="0x0002">
+            </div>
+            <div style="grid-column: 1 / -1;">
+              <label class="label" for="usb-product-name">USB Product Name</label>
+              <input class="input" id="usb-product-name" type="text" placeholder="ESP32-S3 HID Console">
+            </div>
+          </div>
+          <p class="small">You can pick a preset and edit values, or choose custom vendor ID/name. Save settings and reboot to apply.</p>
 
           <div class="settings-actions">
             <button id="save-settings-btn" class="btn-primary">Save Settings</button>
