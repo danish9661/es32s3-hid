@@ -1874,9 +1874,13 @@ async function loadKvmStatus() {
 
     const d = await res.json();
 
-    qs("kvm-enabled").checked = Boolean(d.enabled);
-    qs("kvm-port").value = d.port ?? 4210;
-    qs("kvm-allowed-ip").value = d.allowed_ip || "";
+    const elEnabled = qs("kvm-enabled");
+    const elPort = qs("kvm-port");
+    const elIp = qs("kvm-allowed-ip");
+
+    if (document.activeElement !== elEnabled) elEnabled.checked = Boolean(d.enabled);
+    if (document.activeElement !== elPort) elPort.value = d.port ?? 4210;
+    if (document.activeElement !== elIp) elIp.value = d.allowed_ip || "";
 
     setText("kvm-packets-rx", String(d.packets_rx ?? 0));
     setText("kvm-packets-dropped", String(d.packets_dropped ?? 0));
