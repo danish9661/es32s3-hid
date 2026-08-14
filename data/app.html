@@ -11,6 +11,7 @@
     <header class="topbar">
       <div class="brand">ESP32-S3 HID Console</div>
       <div class="topbar-right">
+        <span id="topbar-ip-badge" class="badge badge-ip">IP: Loading...</span>
         <span id="run-state" class="badge">Checking status...</span>
         <button id="stop-btn" class="btn-danger">Stop</button>
         <button id="logout-btn" class="btn-outline">Logout</button>
@@ -305,6 +306,52 @@
         <div class="panel settings-box">
           <h2>Device Settings</h2>
 
+          <div class="network-info-card">
+            <div class="network-head">
+              <h3>Device Access & IP Addresses</h3>
+              <button id="refresh-net-btn" class="btn-outline btn-sm">Refresh Network</button>
+            </div>
+            <p class="small">Connect to your home router SSID/password below. Once connected, open this console using your Home WiFi IP or mDNS hostname.</p>
+
+            <div class="network-grid">
+              <div class="net-card">
+                <span class="net-title">Home WiFi IP (Station)</span>
+                <strong id="net-sta-ip" class="net-ip disconnected">Not Connected</strong>
+                <div class="net-actions">
+                  <button id="net-copy-sta-ip" class="btn-outline btn-sm">Copy Link</button>
+                  <button id="net-open-sta-ip" class="btn-primary btn-sm">Open</button>
+                </div>
+                <span id="net-sta-status" class="net-sub">Status: Disconnected</span>
+              </div>
+
+              <div class="net-card">
+                <span class="net-title">Direct AP IP (Access Point)</span>
+                <strong id="net-ap-ip" class="net-ip">192.168.4.1</strong>
+                <div class="net-actions">
+                  <button id="net-copy-ap-ip" class="btn-outline btn-sm">Copy Link</button>
+                </div>
+                <span id="net-ap-status" class="net-sub">Direct ESP Access Point</span>
+              </div>
+
+              <div class="net-card">
+                <span class="net-title">Local Hostname (mDNS)</span>
+                <strong id="net-mdns" class="net-ip">http://esp32-hid.local</strong>
+                <div class="net-actions">
+                  <button id="net-open-mdns" class="btn-primary btn-sm">Open .local</button>
+                </div>
+                <span class="net-sub">Direct access on Windows/Mac/iOS</span>
+              </div>
+
+              <div class="net-card">
+                <span class="net-title">Hardware & Signal</span>
+                <strong id="net-mac" class="net-ip">--:--:--:--:--:--</strong>
+                <span id="net-signal" class="net-sub">Signal: -- dBm</span>
+                <span id="net-gateway" class="net-sub">Gateway: --</span>
+              </div>
+            </div>
+          </div>
+
+          <h3 style="margin-top:20px;">WiFi & Login Credentials</h3>
           <div class="settings-grid">
             <div>
               <label class="label" for="ap-ssid">AP SSID</label>

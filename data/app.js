@@ -359,12 +359,69 @@ function updateRunBadge(busy) {
   }
 }
 
+function updateNetworkInfo(d) {
+  if (!d) return;
+
+  const staConnected = Boolean(d.sta_connected);
+  const staIp = d.sta_ip || "";
+  const apIp = d.ap_ip || "192.168.4.1";
+
+  const topIp = qs("topbar-ip-badge");
+  if (topIp) {
+    if (staConnected && staIp) {
+      topIp.textContent = "Home IP: " + staIp;
+      topIp.className = "badge badge-ip";
+    } else {
+      topIp.textContent = "AP: " + apIp;
+      topIp.className = "badge";
+    }
+  }
+
+  const netStaIp = qs("net-sta-ip");
+  const netStaStatus = qs("net-sta-status");
+  const btnCopySta = qs("net-copy-sta-ip");
+  const btnOpenSta = qs("net-open-sta-ip");
+
+  if (netStaIp) {
+    if (staConnected && staIp) {
+      netStaIp.textContent = staIp;
+      netStaIp.className = "net-ip";
+      if (netStaStatus) {
+        netStaStatus.textContent = "Connected" + (d.sta_rssi ? ` (${d.sta_rssi} dBm)` : "");
+        netStaStatus.style.color = "#44c08a";
+      }
+      if (btnCopySta) btnCopySta.disabled = false;
+      if (btnOpenSta) btnOpenSta.disabled = false;
+    } else {
+      netStaIp.textContent = "Not Connected";
+      netStaIp.className = "net-ip disconnected";
+      if (netStaStatus) {
+        netStaStatus.textContent = d.sta_ssid ? "Status: Disconnected / Retrying" : "Status: No Router Configured";
+        netStaStatus.style.color = "";
+      }
+      if (btnCopySta) btnCopySta.disabled = true;
+      if (btnOpenSta) btnOpenSta.disabled = true;
+    }
+  }
+
+  if (qs("net-ap-ip")) qs("net-ap-ip").textContent = apIp;
+  if (qs("net-mdns") && d.mdns_host) qs("net-mdns").textContent = d.mdns_host;
+  if (qs("net-mac") && d.mac_address) qs("net-mac").textContent = d.mac_address;
+  if (qs("net-signal") && typeof d.sta_rssi !== "undefined") {
+    qs("net-signal").textContent = staConnected ? `Signal: ${d.sta_rssi} dBm` : "Signal: N/A";
+  }
+  if (qs("net-gateway") && d.sta_gateway) {
+    qs("net-gateway").textContent = `Gateway: ${d.sta_gateway}`;
+  }
+}
+
 async function refreshStatus() {
   try {
     const res = await api("/api/status");
     if (!res.ok) return;
     const data = await res.json();
     updateRunBadge(Boolean(data.busy || data.queued));
+    updateNetworkInfo(data);
   } catch (_) {}
 }
 
@@ -2048,6 +2105,7 @@ async function loadSettings() {
     }
 
     const d = await res.json();
+    updateNetworkInfo(d);
     qs("ap-ssid").value = d.ap_ssid || "";
     qs("ap-pass").value = d.ap_pass || "";
     qs("sta-ssid").value = d.sta_ssid || "";
@@ -2340,6 +2398,31 @@ function initEvents() {
   bindSliderReadout("burst-pause", " ms");
   bindSliderReadout("line-delay", " ms");
   bindSliderReadout("kvm-mouse-smooth", "%");
+
+  qs("refresh-net-btn").addEventListener("click", () => {
+    loadSettings();
+    refreshStatus();
+  });
+  qs("net-copy-sta-ip").addEventListener("click", () => {
+    const ip = qs("net-sta-ip").textContent;
+    if (ip && ip !== "Not Connected") {
+      copyTextToClipboard("http://" + ip, "Home WiFi IP link copied.");
+    }
+  });
+  qs("net-open-sta-ip").addEventListener("click", () => {
+    const ip = qs("net-sta-ip").textContent;
+    if (ip && ip !== "Not Connected") {
+      window.open("http://" + ip, "_blank");
+    }
+  });
+  qs("net-copy-ap-ip").addEventListener("click", () => {
+    const ip = qs("net-ap-ip").textContent;
+    if (ip) copyTextToClipboard("http://" + ip, "AP IP link copied.");
+  });
+  qs("net-open-mdns").addEventListener("click", () => {
+    const host = qs("net-mdns").textContent;
+    if (host) window.open(host, "_blank");
+  });
 
   updateKvmHelperPanel();
 }

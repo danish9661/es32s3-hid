@@ -629,3 +629,82 @@ select.input {
     flex-wrap: wrap;
   }
 }
+
+.badge-ip {
+  background: rgba(68, 192, 138, 0.16);
+  border: 1px solid rgba(68, 192, 138, 0.4);
+  color: #44c08a;
+  font-family: monospace;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+
+.network-info-card {
+  margin-bottom: 20px;
+  padding: 16px;
+  background: rgba(20, 34, 39, 0.65);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.network-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.network-head h3 {
+  margin: 0;
+}
+
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.net-card {
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.net-title {
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.net-ip {
+  font-family: monospace;
+  font-size: 1.12rem;
+  color: #5fe3a1;
+  word-break: break-all;
+}
+
+.net-ip.disconnected {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.net-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.net-sub {
+  font-size: 0.76rem;
+  color: var(--muted);
+}

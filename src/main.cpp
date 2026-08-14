@@ -6,6 +6,8 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
+#include <Update.h>
+#include <ESPmDNS.h>
 #include "USB.h"
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
@@ -13,6 +15,80 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include <cstring>
+
+// --- KEY DEFINITIONS ---
+#ifndef KEY_PRINT_SCREEN
+#define KEY_PRINT_SCREEN 206
+#endif
+#ifndef KEY_SCROLL_LOCK
+#define KEY_SCROLL_LOCK 207
+#endif
+#ifndef KEY_PAUSE
+#define KEY_PAUSE 208
+#endif
+#ifndef KEY_INSERT
+#define KEY_INSERT 209
+#endif
+#ifndef KEY_HOME
+#define KEY_HOME 210
+#endif
+#ifndef KEY_PAGE_UP
+#define KEY_PAGE_UP 211
+#endif
+#ifndef KEY_DELETE
+#define KEY_DELETE 212
+#endif
+#ifndef KEY_END
+#define KEY_END 213
+#endif
+#ifndef KEY_PAGE_DOWN
+#define KEY_PAGE_DOWN 214
+#endif
+#ifndef KEY_NUM_LOCK
+#define KEY_NUM_LOCK 219
+#endif
+#ifndef KEY_CAPS_LOCK
+#define KEY_CAPS_LOCK 193
+#endif
+#ifndef KEY_APPLICATION
+#define KEY_APPLICATION 101
+#endif
+#ifndef KEY_F1
+#define KEY_F1 194
+#endif
+#ifndef KEY_F2
+#define KEY_F2 195
+#endif
+#ifndef KEY_F3
+#define KEY_F3 196
+#endif
+#ifndef KEY_F4
+#define KEY_F4 197
+#endif
+#ifndef KEY_F5
+#define KEY_F5 198
+#endif
+#ifndef KEY_F6
+#define KEY_F6 199
+#endif
+#ifndef KEY_F7
+#define KEY_F7 200
+#endif
+#ifndef KEY_F8
+#define KEY_F8 201
+#endif
+#ifndef KEY_F9
+#define KEY_F9 202
+#endif
+#ifndef KEY_F10
+#define KEY_F10 203
+#endif
+#ifndef KEY_F11
+#define KEY_F11 204
+#endif
+#ifndef KEY_F12
+#define KEY_F12 205
+#endif
 
 // --- BOARD / DEVICE CONFIG ---
 #ifndef STATUS_LED_PIN
@@ -119,6 +195,7 @@ volatile bool isWorkerBusy = false;
 volatile bool stopScriptFlag = false;
 volatile bool isJobQueued = false;
 volatile bool isInputLocked = false;
+volatile uint32_t inputLockTimestamp = 0;
 
 String activeSessionToken = "";
 IPAddress activeSessionIp;
@@ -1085,10 +1162,160 @@ size_t nextLineStart(size_t lineEnd, size_t totalLength) {
   return lineEnd + 1;
 }
 
+uint8_t resolveDuckyKey(const String &token) {
+  String upper = token;
+  upper.toUpperCase();
+  upper.trim();
+
+  if (upper == "ENTER" || upper == "RETURN") return KEY_RETURN;
+  if (upper == "TAB") return KEY_TAB;
+  if (upper == "ESC" || upper == "ESCAPE") return KEY_ESC;
+  if (upper == "BACKSPACE" || upper == "BKSP") return KEY_BACKSPACE;
+  if (upper == "DELETE" || upper == "DEL") return KEY_DELETE;
+  if (upper == "INSERT" || upper == "INS") return KEY_INSERT;
+  if (upper == "UP" || upper == "UPARROW") return KEY_UP_ARROW;
+  if (upper == "DOWN" || upper == "DOWNARROW") return KEY_DOWN_ARROW;
+  if (upper == "LEFT" || upper == "LEFTARROW") return KEY_LEFT_ARROW;
+  if (upper == "RIGHT" || upper == "RIGHTARROW") return KEY_RIGHT_ARROW;
+  if (upper == "PAGEUP" || upper == "PAGE_UP") return KEY_PAGE_UP;
+  if (upper == "PAGEDOWN" || upper == "PAGE_DOWN") return KEY_PAGE_DOWN;
+  if (upper == "HOME") return KEY_HOME;
+  if (upper == "END") return KEY_END;
+  if (upper == "CAPSLOCK" || upper == "CAPS") return KEY_CAPS_LOCK;
+  if (upper == "NUMLOCK") return KEY_NUM_LOCK;
+  if (upper == "SCROLLLOCK") return KEY_SCROLL_LOCK;
+  if (upper == "PRINTSCREEN" || upper == "PRINTSCRN" || upper == "PRINT") return KEY_PRINT_SCREEN;
+  if (upper == "PAUSE" || upper == "BREAK") return KEY_PAUSE;
+  if (upper == "APP" || upper == "MENU") return KEY_APPLICATION;
+  if (upper == "SPACE") return ' ';
+
+  if (upper == "F1") return KEY_F1;
+  if (upper == "F2") return KEY_F2;
+  if (upper == "F3") return KEY_F3;
+  if (upper == "F4") return KEY_F4;
+  if (upper == "F5") return KEY_F5;
+  if (upper == "F6") return KEY_F6;
+  if (upper == "F7") return KEY_F7;
+  if (upper == "F8") return KEY_F8;
+  if (upper == "F9") return KEY_F9;
+  if (upper == "F10") return KEY_F10;
+  if (upper == "F11") return KEY_F11;
+  if (upper == "F12") return KEY_F12;
+
+  if (token.length() == 1) {
+    char c = token[0];
+    if (c >= 'A' && c <= 'Z') {
+      return static_cast<uint8_t>(c - 'A' + 'a');
+    }
+    return static_cast<uint8_t>(c);
+  }
+
+  return 0;
+}
+
+bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
+  String trimmed = rawLine;
+  trimmed.trim();
+  if (trimmed.isEmpty()) return false;
+
+  String upper = trimmed;
+  upper.toUpperCase();
+
+  if (upper.startsWith("REM")) return false;
+
+  if (upper.startsWith("STRING ")) {
+    int spacePos = rawLine.indexOf(' ');
+    if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
+      String payload = rawLine.substring(spacePos + 1);
+      for (size_t c = 0; c < payload.length(); c++) {
+        if (stopScriptFlag) break;
+        Keyboard.write(static_cast<uint8_t>(payload[c]));
+        if (typeDelay > 0) delay(typeDelay);
+      }
+    }
+  } else if (upper.startsWith("STRINGLN ")) {
+    int spacePos = rawLine.indexOf(' ');
+    if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
+      String payload = rawLine.substring(spacePos + 1);
+      for (size_t c = 0; c < payload.length(); c++) {
+        if (stopScriptFlag) break;
+        Keyboard.write(static_cast<uint8_t>(payload[c]));
+        if (typeDelay > 0) delay(typeDelay);
+      }
+      keyboardTap(KEY_RETURN);
+    }
+  } else if (upper.startsWith("DELAY ")) {
+    int d = trimmed.substring(6).toInt();
+    if (d > 0) delay(d);
+  } else {
+    String normalized = trimmed;
+    for (size_t k = 0; k < normalized.length(); k++) {
+      if (normalized[k] == '+' || normalized[k] == '-') normalized[k] = ' ';
+    }
+
+    bool ctrl = false, alt = false, shift = false, gui = false;
+    uint8_t targetKey = 0;
+    int tokenCount = 0;
+
+    int pos = 0;
+    while (pos < static_cast<int>(normalized.length())) {
+      while (pos < static_cast<int>(normalized.length()) && normalized[pos] == ' ') pos++;
+      if (pos >= static_cast<int>(normalized.length())) break;
+
+      int nextSpace = normalized.indexOf(' ', pos);
+      if (nextSpace < 0) nextSpace = normalized.length();
+
+      String token = normalized.substring(pos, nextSpace);
+      pos = nextSpace;
+
+      String tokUpper = token;
+      tokUpper.toUpperCase();
+      tokUpper.trim();
+
+      if (tokUpper.isEmpty()) continue;
+      tokenCount++;
+
+      if (tokUpper == "CTRL" || tokUpper == "CONTROL") {
+        ctrl = true;
+      } else if (tokUpper == "ALT") {
+        alt = true;
+      } else if (tokUpper == "SHIFT") {
+        shift = true;
+      } else if (tokUpper == "GUI" || tokUpper == "WINDOWS" || tokUpper == "WIN" || tokUpper == "COMMAND") {
+        gui = true;
+      } else {
+        uint8_t k = resolveDuckyKey(token);
+        if (k != 0) {
+          targetKey = k;
+        }
+      }
+    }
+
+    if (tokenCount > 0) {
+      if (ctrl || alt || shift || gui) {
+        if (targetKey != 0) {
+          keyboardCombo(ctrl, alt, shift, gui, targetKey);
+        } else {
+          if (gui) keyboardTap(KEY_LEFT_GUI, 80);
+          else if (ctrl) keyboardTap(KEY_LEFT_CTRL, 40);
+          else if (alt) keyboardTap(KEY_LEFT_ALT, 40);
+          else if (shift) keyboardTap(KEY_LEFT_SHIFT, 40);
+        }
+      } else if (targetKey != 0) {
+        keyboardTap(targetKey);
+      }
+    }
+  }
+
+  if (defaultDelay > 0) delay(defaultDelay);
+  return true;
+}
+
 void parseAndExecuteInternal(size_t totalLength) {
   size_t i = 0;
   int defaultDelay = 0;
   int lineCounter = 0;
+  String lastExecutableLine = "";
 
   while (i < totalLength) {
     if (stopScriptFlag) break;
@@ -1108,10 +1335,19 @@ void parseAndExecuteInternal(size_t totalLength) {
 
     if (upper.startsWith("REM")) continue;
 
+    if (upper.startsWith("DEFAULT_DELAY ")) {
+      defaultDelay = clampInt(trimmed.substring(14).toInt(), 0, 5000);
+      continue;
+    } else if (upper.startsWith("DEFAULTDELAY ")) {
+      defaultDelay = clampInt(trimmed.substring(13).toInt(), 0, 5000);
+      continue;
+    }
+
     if (upper == "BLOCK") {
       size_t blockStart = i;
       size_t cursor = i;
       size_t blockEnd = totalLength;
+      bool foundEnd = false;
 
       while (cursor < totalLength) {
         size_t markerEnd = findLineEnd(cursor, totalLength);
@@ -1121,82 +1357,39 @@ void parseAndExecuteInternal(size_t totalLength) {
         if (marker == "ENDBLOCK") {
           blockEnd = cursor;
           i = nextLineStart(markerEnd, totalLength);
+          foundEnd = true;
           break;
         }
         cursor = nextLineStart(markerEnd, totalLength);
       }
 
+      if (!foundEnd) {
+        i = totalLength;
+      }
+
       if (blockEnd > blockStart) {
         typeTextInternal(blockStart, blockEnd - blockStart);
+      }
+      lastExecutableLine = "";
+      continue;
+    }
+
+    if (upper.startsWith("REPEAT ")) {
+      int repeatCount = clampInt(trimmed.substring(7).toInt(), 1, 1000);
+      if (!lastExecutableLine.isEmpty()) {
+        for (int r = 0; r < repeatCount; r++) {
+          if (stopScriptFlag) break;
+          executeDuckyCommandLine(lastExecutableLine, defaultDelay);
+          lineCounter++;
+          if (lineCounter % 8 == 0) vTaskDelay(1);
+        }
       }
       continue;
     }
 
-    if (upper.startsWith("STRING ")) {
-      int spacePos = rawLine.indexOf(' ');
-      if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
-        String payload = rawLine.substring(spacePos + 1);
-        for (size_t c = 0; c < payload.length(); c++) {
-          if (stopScriptFlag) break;
-          Keyboard.write(static_cast<uint8_t>(payload[c]));
-          if (typeDelay > 0) delay(typeDelay);
-        }
-      }
-    } else if (upper.startsWith("STRINGLN ")) {
-      int spacePos = rawLine.indexOf(' ');
-      if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
-        String payload = rawLine.substring(spacePos + 1);
-        for (size_t c = 0; c < payload.length(); c++) {
-          if (stopScriptFlag) break;
-          Keyboard.write(static_cast<uint8_t>(payload[c]));
-          if (typeDelay > 0) delay(typeDelay);
-        }
-        keyboardTap(KEY_RETURN);
-      }
-    } else if (upper.startsWith("DELAY ")) {
-      int d = trimmed.substring(6).toInt();
-      if (d > 0) delay(d);
-    } else if (upper.startsWith("DEFAULT_DELAY ")) {
-      defaultDelay = clampInt(trimmed.substring(14).toInt(), 0, 5000);
-    } else if (upper.startsWith("DEFAULTDELAY ")) {
-      defaultDelay = clampInt(trimmed.substring(13).toInt(), 0, 5000);
-    } else if (upper == "ENTER") {
-      keyboardTap(KEY_RETURN);
-    } else if (upper == "TAB") {
-      keyboardTap(KEY_TAB);
-    } else if (upper == "ESC" || upper == "ESCAPE") {
-      keyboardTap(KEY_ESC);
-    } else if (upper == "BACKSPACE") {
-      keyboardTap(KEY_BACKSPACE);
-    } else if (upper == "DELETE" || upper == "DEL") {
-      keyboardTap(KEY_DELETE);
-    } else if (upper == "UP" || upper == "UPARROW") {
-      keyboardTap(KEY_UP_ARROW);
-    } else if (upper == "DOWN" || upper == "DOWNARROW") {
-      keyboardTap(KEY_DOWN_ARROW);
-    } else if (upper == "LEFT" || upper == "LEFTARROW") {
-      keyboardTap(KEY_LEFT_ARROW);
-    } else if (upper == "RIGHT" || upper == "RIGHTARROW") {
-      keyboardTap(KEY_RIGHT_ARROW);
-    } else if (upper == "SPACE") {
-      Keyboard.write(' ');
-    } else if (upper == "GUI" || upper == "WINDOWS") {
-      keyboardTap(KEY_LEFT_GUI, 80);
-    } else if (upper.startsWith("GUI ") || upper.startsWith("WINDOWS ")) {
-      char key = trimmed.charAt(trimmed.length() - 1);
-      keyboardCombo(false, false, false, true, static_cast<uint8_t>(key));
-    } else if (upper.startsWith("CTRL ")) {
-      char key = trimmed.charAt(trimmed.length() - 1);
-      keyboardCombo(true, false, false, false, static_cast<uint8_t>(key));
-    } else if (upper.startsWith("ALT ")) {
-      char key = trimmed.charAt(trimmed.length() - 1);
-      keyboardCombo(false, true, false, false, static_cast<uint8_t>(key));
-    } else if (upper.startsWith("SHIFT ")) {
-      char key = trimmed.charAt(trimmed.length() - 1);
-      keyboardCombo(false, false, true, false, static_cast<uint8_t>(key));
+    if (executeDuckyCommandLine(rawLine, defaultDelay)) {
+      lastExecutableLine = rawLine;
     }
-
-    if (defaultDelay > 0) delay(defaultDelay);
 
     lineCounter++;
     if (lineCounter % 8 == 0) {
@@ -1529,7 +1722,14 @@ void kvmNetworkTask(void *parameter) {
       continue;
     }
 
+    uint32_t nowMs = millis();
+
     if (packetSize <= 0) {
+      if (kvmLastPacketMs > 0 && (nowMs - kvmLastPacketMs > 1500)) {
+        queueHidReleaseAll();
+        kvmLastPacketMs = 0;
+        kvmHasSequence = false;
+      }
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
@@ -1555,12 +1755,15 @@ void kvmNetworkTask(void *parameter) {
     if (kvmHasSequence) {
       int32_t delta = static_cast<int32_t>(packet.sequence - kvmLastSequence);
       if (delta <= 0) {
-        kvmPacketsDropped++;
-        continue;
+        if ((nowMs - kvmLastPacketMs > 1500) || (packet.sequence <= 10 && kvmLastSequence > 50)) {
+          kvmHasSequence = false;
+        } else {
+          kvmPacketsDropped++;
+          continue;
+        }
       }
     }
 
-    uint32_t nowMs = millis();
     kvmHasSequence = true;
     kvmLastSequence = packet.sequence;
     kvmLastSourceIp = sourceIp;
@@ -1611,17 +1814,27 @@ void kvmNetworkTask(void *parameter) {
 }
 
 String jsonStatus() {
+  bool staConnected = (WiFi.status() == WL_CONNECTED);
+  String staIp = staConnected ? WiFi.localIP().toString() : "";
+  String apIp = WiFi.softAPIP().toString();
+
   String json = "{";
   json += "\"busy\":" + String(isWorkerBusy ? "true" : "false");
   json += ",\"queued\":" + String(isJobQueued ? "true" : "false");
   json += ",\"core_script\":1";
   json += ",\"core_hid\":0";
+  json += ",\"sta_connected\":" + String(staConnected ? "true" : "false");
+  json += ",\"sta_ip\":\"" + staIp + "\"";
+  json += ",\"ap_ip\":\"" + apIp + "\"";
+  json += ",\"sta_rssi\":" + String(staConnected ? WiFi.RSSI() : 0);
+  json += ",\"mdns_host\":\"http://esp32-hid.local\"";
   json += "}";
   return json;
 }
 
 void connectWiFi() {
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
 
   bool staConnected = false;
   if (!sta_ssid.isEmpty()) {
@@ -1629,7 +1842,7 @@ void connectWiFi() {
     WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
 
     uint32_t start = millis();
-    while (millis() - start < 12000) {
+    while (millis() - start < 10000) {
       if (WiFi.status() == WL_CONNECTED) {
         staConnected = true;
         break;
@@ -1648,6 +1861,12 @@ void connectWiFi() {
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
   if (staConnected) {
     Serial.printf("STA IP: %s\n", WiFi.localIP().toString().c_str());
+  }
+
+  if (MDNS.begin("esp32-hid")) {
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addServiceTxt("http", "tcp", "path", "/");
+    Serial.println("mDNS responder started: http://esp32-hid.local");
   }
 }
 
@@ -1673,12 +1892,21 @@ void handlePayloadUpload(
   if (!hasAccess(request)) return;
 
   if (index == 0) {
+    uint32_t now = millis();
+    if (isInputLocked && (now - inputLockTimestamp > 5000)) {
+      isInputLocked = false;
+    }
+
     if (isWorkerBusy || isJobQueued || isInputLocked) {
       request->_tempObject = reinterpret_cast<void *>(STATE_REJECTED);
     } else {
       request->_tempObject = reinterpret_cast<void *>(STATE_OK);
       bufferIndex = 0;
       isInputLocked = true;
+      inputLockTimestamp = now;
+      request->onDisconnect([]() {
+        isInputLocked = false;
+      });
     }
   }
 
@@ -1819,7 +2047,15 @@ void registerRoutes() {
     [](AsyncWebServerRequest *request) {},
     nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (index == 0) request->_tempObject = new String();
+      if (index == 0) {
+        request->_tempObject = new String();
+        request->onDisconnect([request]() {
+          if (request->_tempObject) {
+            delete reinterpret_cast<String *>(request->_tempObject);
+            request->_tempObject = nullptr;
+          }
+        });
+      }
 
       String *body = reinterpret_cast<String *>(request->_tempObject);
       if (!body) {
@@ -1985,7 +2221,15 @@ void registerRoutes() {
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (!hasAccess(request)) return;
 
-      if (index == 0) request->_tempObject = new String();
+      if (index == 0) {
+        request->_tempObject = new String();
+        request->onDisconnect([request]() {
+          if (request->_tempObject) {
+            delete reinterpret_cast<String *>(request->_tempObject);
+            request->_tempObject = nullptr;
+          }
+        });
+      }
       String *body = reinterpret_cast<String *>(request->_tempObject);
 
       if (!body) {
@@ -2793,12 +3037,23 @@ void registerRoutes() {
   server.on("/api/get_settings", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
 
-    DynamicJsonDocument doc(2304);
+    DynamicJsonDocument doc(2560);
     doc["ap_ssid"] = ap_ssid;
     doc["ap_pass"] = ap_pass;
     doc["sta_ssid"] = sta_ssid;
     doc["sta_pass"] = sta_pass;
     doc["admin_user"] = admin_user;
+
+    bool staConnected = (WiFi.status() == WL_CONNECTED);
+    doc["sta_connected"] = staConnected;
+    doc["sta_ip"] = staConnected ? WiFi.localIP().toString() : "";
+    doc["sta_gateway"] = staConnected ? WiFi.gatewayIP().toString() : "";
+    doc["sta_subnet"] = staConnected ? WiFi.subnetMask().toString() : "";
+    doc["sta_rssi"] = staConnected ? WiFi.RSSI() : 0;
+    doc["ap_ip"] = WiFi.softAPIP().toString();
+    doc["ap_clients"] = WiFi.softAPgetStationNum();
+    doc["mac_address"] = WiFi.macAddress();
+    doc["mdns_host"] = "http://esp32-hid.local";
 
     doc["login_rate_limit"] = loginRateLimitEnabled;
     doc["proxy_auth_enabled"] = proxyAuthEnabled;
@@ -2835,7 +3090,15 @@ void registerRoutes() {
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (!hasAccess(request)) return;
 
-      if (index == 0) request->_tempObject = new String();
+      if (index == 0) {
+        request->_tempObject = new String();
+        request->onDisconnect([request]() {
+          if (request->_tempObject) {
+            delete reinterpret_cast<String *>(request->_tempObject);
+            request->_tempObject = nullptr;
+          }
+        });
+      }
       String *body = reinterpret_cast<String *>(request->_tempObject);
 
       if (!body) {
@@ -2874,6 +3137,56 @@ void registerRoutes() {
     delay(350);
     ESP.restart();
   });
+
+  server.on(
+    "/api/ota",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+      bool shouldReboot = !Update.hasError();
+      AsyncWebServerResponse *response = request->beginResponse(
+        shouldReboot ? 200 : 500,
+        "application/json",
+        shouldReboot ? "{\"ok\":true,\"rebooting\":true}" : "{\"error\":\"ota-failed\"}"
+      );
+      response->addHeader("Connection", "close");
+      request->send(response);
+      if (shouldReboot) {
+        delay(500);
+        ESP.restart();
+      }
+    },
+    [](AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
+      if (!hasAccess(request)) return;
+
+      if (index == 0) {
+        int cmd = U_FLASH;
+        if (request->hasParam("type")) {
+          String type = request->getParam("type")->value();
+          type.toLowerCase();
+          if (type == "fs" || type == "littlefs" || type == "spiffs") {
+            cmd = U_SPIFFS;
+          }
+        }
+        size_t maxSpace = (cmd == U_SPIFFS) ? 0x900000 : (3 * 1024 * 1024);
+        if (!Update.begin(maxSpace, cmd)) {
+          Update.printError(Serial);
+        }
+      }
+
+      if (!Update.hasError()) {
+        if (Update.write(data, len) != len) {
+          Update.printError(Serial);
+        }
+      }
+
+      if (final) {
+        if (!Update.end(true)) {
+          Update.printError(Serial);
+        }
+      }
+    }
+  );
 }
 
 void setup() {
