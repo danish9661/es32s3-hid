@@ -184,35 +184,222 @@ const defaultKeyboardPrefs = {
 };
 
 const usbVendorPresets = {
-  espressif: {
+  // Office & Enterprise Peripherals
+  dell_kb216: {
+    vendorName: "Dell Computer Corp.",
+    vid: 0x413C,
+    pid: 0x2113,
+    productName: "Dell KB216 Multimedia Keyboard",
+  },
+  dell_ms116: {
+    vendorName: "Dell Computer Corp.",
+    vid: 0x413C,
+    pid: 0x301A,
+    productName: "Dell MS116 Optical Mouse",
+  },
+  logitech_k120: {
+    vendorName: "Logitech",
+    vid: 0x046D,
+    pid: 0xC31C,
+    productName: "Logitech K120 Keyboard",
+  },
+  logitech_unifying: {
+    vendorName: "Logitech",
+    vid: 0x046D,
+    pid: 0xC52B,
+    productName: "Logitech USB Unifying Receiver",
+  },
+  logitech_mx_master: {
+    vendorName: "Logitech",
+    vid: 0x046D,
+    pid: 0xB023,
+    productName: "Logitech MX Master 3S",
+  },
+  hp_standard_kbd: {
+    vendorName: "Hewlett-Packard",
+    vid: 0x03F0,
+    pid: 0x0024,
+    productName: "HP Standard Keyboard",
+  },
+  hp_link_5: {
+    vendorName: "Hewlett-Packard",
+    vid: 0x03F0,
+    pid: 0x134A,
+    productName: "HP Link-5 Wireless Receiver",
+  },
+  lenovo_calliope: {
+    vendorName: "Lenovo",
+    vid: 0x17EF,
+    pid: 0x608D,
+    productName: "Lenovo Calliope USB Keyboard",
+  },
+  lenovo_mouse: {
+    vendorName: "Lenovo",
+    vid: 0x17EF,
+    pid: 0x6082,
+    productName: "Lenovo USB Optical Mouse",
+  },
+  microsoft_basic: {
+    vendorName: "Microsoft Corp.",
+    vid: 0x045E,
+    pid: 0x0752,
+    productName: "Microsoft Wired Keyboard 600",
+  },
+  microsoft_comfort: {
+    vendorName: "Microsoft Corp.",
+    vid: 0x045E,
+    pid: 0x07F8,
+    productName: "Microsoft Comfort Optical Mouse 3000",
+  },
+  apple_magic_kbd: {
+    vendorName: "Apple Inc.",
+    vid: 0x05AC,
+    pid: 0x024F,
+    productName: "Apple Magic Keyboard",
+  },
+  apple_magic_mouse: {
+    vendorName: "Apple Inc.",
+    vid: 0x05AC,
+    pid: 0x030D,
+    productName: "Apple Magic Mouse",
+  },
+
+  // Gaming Gear & Mechanical Keyboards
+  razer_blackwidow: {
+    vendorName: "Razer Inc.",
+    vid: 0x1532,
+    pid: 0x0228,
+    productName: "Razer BlackWidow Chroma",
+  },
+  razer_deathadder: {
+    vendorName: "Razer Inc.",
+    vid: 0x1532,
+    pid: 0x0084,
+    productName: "Razer DeathAdder Essential",
+  },
+  corsair_k70: {
+    vendorName: "Corsair",
+    vid: 0x1B1C,
+    pid: 0x1B09,
+    productName: "Corsair K70 RGB Mechanical Keyboard",
+  },
+  corsair_harpoon: {
+    vendorName: "Corsair",
+    vid: 0x1B1C,
+    pid: 0x1B3C,
+    productName: "Corsair Harpoon RGB Gaming Mouse",
+  },
+  steelseries_apex: {
+    vendorName: "SteelSeries",
+    vid: 0x1038,
+    pid: 0x1610,
+    productName: "SteelSeries Apex Pro Keyboard",
+  },
+  steelseries_rival: {
+    vendorName: "SteelSeries",
+    vid: 0x1038,
+    pid: 0x1702,
+    productName: "SteelSeries Rival 300 Gaming Mouse",
+  },
+  hyperx_alloy: {
+    vendorName: "Kingston / HyperX",
+    vid: 0x0951,
+    pid: 0x16DE,
+    productName: "HyperX Alloy FPS Mechanical Keyboard",
+  },
+  ducky_one_2: {
+    vendorName: "DuckyChannel",
+    vid: 0x04D9,
+    pid: 0xA0CD,
+    productName: "Ducky One 2 Mini RGB",
+  },
+  keychron_q1: {
+    vendorName: "Keychron",
+    vid: 0x3434,
+    pid: 0x0121,
+    productName: "Keychron Q1 Mechanical Keyboard",
+  },
+  wooting_60he: {
+    vendorName: "Wooting",
+    vid: 0x31E3,
+    pid: 0x1301,
+    productName: "Wooting 60HE Analog Keyboard",
+  },
+
+  // USB Flash Drives & Storage (MSC Mode)
+  sandisk_cruzer: {
+    vendorName: "SanDisk Corp.",
+    vid: 0x0781,
+    pid: 0x5567,
+    productName: "SanDisk Cruzer Blade 32GB",
+  },
+  sandisk_ultra: {
+    vendorName: "SanDisk Corp.",
+    vid: 0x0781,
+    pid: 0x5581,
+    productName: "SanDisk Ultra USB 3.0",
+  },
+  kingston_datatraveler: {
+    vendorName: "Kingston Technology",
+    vid: 0x0951,
+    pid: 0x1666,
+    productName: "Kingston DataTraveler 3.0",
+  },
+  samsung_fit: {
+    vendorName: "Samsung Electronics",
+    vid: 0x04E8,
+    pid: 0x61B6,
+    productName: "Samsung USB 3.1 Flash Drive FIT",
+  },
+  transcend_jetflash: {
+    vendorName: "Transcend Information",
+    vid: 0x058F,
+    pid: 0x6387,
+    productName: "Transcend JetFlash 700",
+  },
+  generic_flash: {
+    vendorName: "Generic",
+    vid: 0x058F,
+    pid: 0x1234,
+    productName: "Mass Storage Device",
+  },
+
+  // Security Tokens & Hardware Development
+  yubico_yubikey5: {
+    vendorName: "Yubico",
+    vid: 0x1050,
+    pid: 0x0407,
+    productName: "YubiKey 5 Series OTP+FIDO+CCID",
+  },
+  yubico_security_key: {
+    vendorName: "Yubico",
+    vid: 0x1050,
+    pid: 0x0120,
+    productName: "Security Key by Yubico",
+  },
+  duckypad: {
+    vendorName: "dekunukem",
+    vid: 0x1209,
+    pid: 0xD0C0,
+    productName: "duckyPad Pro 15-Key Macro",
+  },
+  arduino_leonardo: {
+    vendorName: "Arduino SA",
+    vid: 0x2341,
+    pid: 0x8036,
+    productName: "Arduino Leonardo HID",
+  },
+  adafruit_trinket: {
+    vendorName: "Adafruit",
+    vid: 0x239A,
+    pid: 0x8008,
+    productName: "Adafruit Trinket M0 Keyboard",
+  },
+  espressif_s3: {
     vendorName: "Espressif",
     vid: 0x303A,
     pid: 0x0002,
     productName: "ESP32-S3 HID Console",
-  },
-  arduino: {
-    vendorName: "Arduino SA",
-    vid: 0x2341,
-    pid: 0x0036,
-    productName: "Arduino Keyboard",
-  },
-  adafruit: {
-    vendorName: "Adafruit",
-    vid: 0x239A,
-    pid: 0x810B,
-    productName: "Adafruit HID Bridge",
-  },
-  logitech: {
-    vendorName: "Logitech",
-    vid: 0x046D,
-    pid: 0xC31C,
-    productName: "USB Keyboard",
-  },
-  microsoft: {
-    vendorName: "Microsoft",
-    vid: 0x045E,
-    pid: 0x07F8,
-    productName: "USB Input Device",
   },
 };
 

@@ -493,14 +493,56 @@
           <h3 style="margin-top:16px;">USB Identity (Applied After Reboot)</h3>
           <div class="settings-grid">
             <div>
-              <label class="label" for="usb-vendor-preset">Vendor Preset</label>
+              <label class="label" for="usb-vendor-preset">Vendor / Hardware Preset</label>
               <select class="input" id="usb-vendor-preset">
-                <option value="custom">Custom</option>
-                <option value="espressif">Espressif (0x303A)</option>
-                <option value="arduino">Arduino SA (0x2341)</option>
-                <option value="adafruit">Adafruit (0x239A)</option>
-                <option value="logitech">Logitech (0x046D)</option>
-                <option value="microsoft">Microsoft (0x045E)</option>
+                <option value="custom">Custom (Manual Entry)</option>
+                
+                <optgroup label="🏢 Office & Enterprise Peripherals">
+                  <option value="dell_kb216">Dell KB216 Keyboard (0x413C / 0x2113)</option>
+                  <option value="dell_ms116">Dell MS116 Optical Mouse (0x413C / 0x301A)</option>
+                  <option value="logitech_k120">Logitech K120 Keyboard (0x046D / 0xC31C)</option>
+                  <option value="logitech_unifying">Logitech Unifying Receiver (0x046D / 0xC52B)</option>
+                  <option value="logitech_mx_master">Logitech MX Master 3S (0x046D / 0xB023)</option>
+                  <option value="hp_standard_kbd">HP Standard Keyboard (0x03F0 / 0x0024)</option>
+                  <option value="hp_link_5">HP Link-5 Wireless Receiver (0x03F0 / 0x134A)</option>
+                  <option value="lenovo_calliope">Lenovo Calliope Keyboard (0x17EF / 0x608D)</option>
+                  <option value="lenovo_mouse">Lenovo Optical Mouse (0x17EF / 0x6082)</option>
+                  <option value="microsoft_basic">Microsoft Wired Keyboard 600 (0x045E / 0x0752)</option>
+                  <option value="microsoft_comfort">Microsoft Comfort Optical Mouse (0x045E / 0x07F8)</option>
+                  <option value="apple_magic_kbd">Apple Magic Keyboard (0x05AC / 0x024F)</option>
+                  <option value="apple_magic_mouse">Apple Magic Mouse (0x05AC / 0x030D)</option>
+                </optgroup>
+
+                <optgroup label="🎮 Gaming Gear & Mechanical Keyboards">
+                  <option value="razer_blackwidow">Razer BlackWidow Chroma (0x1532 / 0x0228)</option>
+                  <option value="razer_deathadder">Razer DeathAdder Essential (0x1532 / 0x0084)</option>
+                  <option value="corsair_k70">Corsair K70 RGB Keyboard (0x1B1C / 0x1B09)</option>
+                  <option value="corsair_harpoon">Corsair Harpoon RGB Mouse (0x1B1C / 0x1B3C)</option>
+                  <option value="steelseries_apex">SteelSeries Apex Pro (0x1038 / 0x1610)</option>
+                  <option value="steelseries_rival">SteelSeries Rival 300 (0x1038 / 0x1702)</option>
+                  <option value="hyperx_alloy">HyperX Alloy FPS Mechanical (0x0951 / 0x16DE)</option>
+                  <option value="ducky_one_2">Ducky One 2 Mini RGB (0x04D9 / 0xA0CD)</option>
+                  <option value="keychron_q1">Keychron Q1 Mechanical (0x3434 / 0x0121)</option>
+                  <option value="wooting_60he">Wooting 60HE Analog (0x31E3 / 0x1301)</option>
+                </optgroup>
+
+                <optgroup label="💾 USB Flash Drives & Storage (MSC Mode)">
+                  <option value="sandisk_cruzer">SanDisk Cruzer Blade (0x0781 / 0x5567)</option>
+                  <option value="sandisk_ultra">SanDisk Ultra USB 3.0 (0x0781 / 0x5581)</option>
+                  <option value="kingston_datatraveler">Kingston DataTraveler 3.0 (0x0951 / 0x1666)</option>
+                  <option value="samsung_fit">Samsung USB 3.1 Flash FIT (0x04E8 / 0x61B6)</option>
+                  <option value="transcend_jetflash">Transcend JetFlash 700 (0x058F / 0x6387)</option>
+                  <option value="generic_flash">Generic Mass Storage (0x058F / 0x1234)</option>
+                </optgroup>
+
+                <optgroup label="🔐 Security Tokens & Embedded Dev">
+                  <option value="yubico_yubikey5">Yubico YubiKey 5 Series (0x1050 / 0x0407)</option>
+                  <option value="yubico_security_key">Yubico Security Key (0x1050 / 0x0120)</option>
+                  <option value="duckypad">duckyPad Pro 15-Key (0x1209 / 0xD0C0)</option>
+                  <option value="arduino_leonardo">Arduino Leonardo (0x2341 / 0x8036)</option>
+                  <option value="adafruit_trinket">Adafruit Trinket M0 (0x239A / 0x8008)</option>
+                  <option value="espressif_s3">Espressif ESP32-S3 Native (0x303A / 0x0002)</option>
+                </optgroup>
               </select>
             </div>
             <div>
