@@ -651,14 +651,21 @@ bool restoreVaultFromNvs() {
   prefs.end();
 
   File f = LittleFS.open(VAULT_FILE, "w");
-  if (f) {
-    f.write(buf, len);
-    f.close();
+  if (!f) {
+    Serial.println("[VAULT] restoreVaultFromNvs: ERROR: Cannot open vault.enc for writing!");
     free(buf);
-    return true;
+    return false;
   }
+  size_t written = f.write(buf, len);
+  f.close();
   free(buf);
-  return false;
+  if (written != len) {
+    Serial.printf("[VAULT] restoreVaultFromNvs: Write incomplete %u/%u\n", (unsigned)written, (unsigned)len);
+    LittleFS.remove(VAULT_FILE);
+    return false;
+  }
+  Serial.printf("[VAULT] restoreVaultFromNvs: Restored vault.enc (%u bytes) from NVS\n", (unsigned)len);
+  return true;
 }
 
 bool isVaultInitialized() {
@@ -698,16 +705,27 @@ bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
   memcpy(hdr.tag, tag, VAULT_TAG_LEN);
   hdr.ciphertextLen = static_cast<uint32_t>(plainLen);
 
+  // Write to LittleFS
   File f = LittleFS.open(VAULT_FILE, "w");
-  if (f) {
-    f.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
-    if (plainLen > 0) {
-      f.write(cipherBuf, plainLen);
-    }
-    f.close();
+  if (!f) {
+    Serial.println("[VAULT] ERROR: Cannot open vault.enc for writing! LittleFS may be full or read-only.");
+    free(cipherBuf);
+    return false;
   }
+  size_t hdrWritten = f.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
+  size_t dataWritten = (plainLen > 0) ? f.write(cipherBuf, plainLen) : 0;
+  f.close();
 
-  // Mirror encrypted ciphertext blob into NVS so LittleFS flashing doesn't erase it
+  if (hdrWritten != sizeof(hdr) || (plainLen > 0 && dataWritten != plainLen)) {
+    Serial.printf("[VAULT] ERROR: Write incomplete: hdr=%u/%u data=%u/%u\n",
+      (unsigned)hdrWritten, (unsigned)sizeof(hdr), (unsigned)dataWritten, (unsigned)plainLen);
+    LittleFS.remove(VAULT_FILE);
+    free(cipherBuf);
+    return false;
+  }
+  Serial.printf("[VAULT] vault.enc written: %u bytes\n", (unsigned)(sizeof(hdr) + plainLen));
+
+  // Mirror to NVS so LittleFS flashing doesn't erase it
   size_t totalDataLen = sizeof(VaultHeader) + plainLen;
   uint8_t *nvsBlob = static_cast<uint8_t *>(malloc(totalDataLen));
   if (nvsBlob) {
