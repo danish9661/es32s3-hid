@@ -3000,18 +3000,26 @@ function renderVaultEntries() {
 function startVaultTicker() {
   if (vaultTickerTimer) clearInterval(vaultTickerTimer);
 
-  vaultTickerTimer = setInterval(() => {
-    if (activeTab !== "vault" || !vaultStatus.unlocked) return;
+  vaultTickerTimer = setInterval(async () => {
+    if (activeTab !== "vault") return;
+    if (!vaultStatus.unlocked) {
+      clearInterval(vaultTickerTimer);
+      vaultTickerTimer = null;
+      return;
+    }
 
     if (vaultStatus.lock_timeout_sec > 0) {
       vaultStatus.lock_timeout_sec--;
       const min = Math.floor(vaultStatus.lock_timeout_sec / 60);
       const sec = String(vaultStatus.lock_timeout_sec % 60).padStart(2, "0");
       const badge = qs("vault-autolock-badge");
-      if (badge) badge.textContent = `Unlocked (${min}:${sec})`;
+      if (badge) badge.textContent = `Auto-locks in ${min}:${sec}`;
 
       if (vaultStatus.lock_timeout_sec <= 0) {
-        refreshVaultView();
+        clearInterval(vaultTickerTimer);
+        vaultTickerTimer = null;
+        await refreshVaultView();
+        return;
       }
     }
 
@@ -3250,11 +3258,15 @@ function bindVaultEvents() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        alert("Failed to save entry: " + (errJson.error || res.status));
+        return;
+      }
       closeVaultModal();
       await loadVaultEntries();
     } catch (_) {
-      alert("Failed to save entry.");
+      alert("Failed to save entry – network error.");
     }
   });
 }
