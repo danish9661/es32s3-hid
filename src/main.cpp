@@ -1727,20 +1727,23 @@ void typeTextInternal(size_t startIndex, size_t length) {
     char c = psramBuffer[startIndex + i];
     Keyboard.write(static_cast<uint8_t>(c));
 
-    if (charDelay > 0) delay(charDelay);
+    // FIX: vTaskDelay yields to RTOS scheduler; stopScriptFlag is checked
+    // immediately after each char rather than blocking Core 1 hard.
+    if (charDelay > 0) vTaskDelay(pdMS_TO_TICKS(charDelay));
 
-    if (i % 24 == 0 && safeLength > 0) {
+    // FIX: progress counter now synced to burstChars (batchSize)
+    if (i % (size_t)batchSize == 0 && safeLength > 0) {
       scriptProgressPercent = static_cast<uint8_t>((i * 100) / safeLength);
     }
 
     sincePause++;
     if (c == '\n' || c == '\r') {
       sincePause = 0;
-      if (newlinePause > 0) delay(newlinePause);
+      if (newlinePause > 0) vTaskDelay(pdMS_TO_TICKS(newlinePause));
     } else if (sincePause >= batchSize) {
       sincePause = 0;
-      if (batchPause > 0) delay(batchPause);
-      vTaskDelay(1);
+      if (batchPause > 0) vTaskDelay(pdMS_TO_TICKS(batchPause));
+      vTaskDelay(1); // yield to web server task
     }
   }
   scriptProgressPercent = 0;
@@ -1753,56 +1756,57 @@ struct DuckyKeyMapEntry {
   uint8_t scancode;
 };
 
+// FIX: Sorted alphabetically (case-insensitive) to enable O(log n) binary search.
 static const DuckyKeyMapEntry FAST_DUCKY_KEYMAP[] = {
-  {"ENTER", KEY_RETURN},
-  {"RETURN", KEY_RETURN},
-  {"TAB", KEY_TAB},
-  {"ESC", KEY_ESC},
-  {"ESCAPE", KEY_ESC},
-  {"BACKSPACE", KEY_BACKSPACE},
-  {"BKSP", KEY_BACKSPACE},
-  {"DELETE", KEY_DELETE},
-  {"DEL", KEY_DELETE},
-  {"INSERT", KEY_INSERT},
-  {"INS", KEY_INSERT},
-  {"UP", KEY_UP_ARROW},
-  {"UPARROW", KEY_UP_ARROW},
-  {"DOWN", KEY_DOWN_ARROW},
-  {"DOWNARROW", KEY_DOWN_ARROW},
-  {"LEFT", KEY_LEFT_ARROW},
-  {"LEFTARROW", KEY_LEFT_ARROW},
-  {"RIGHT", KEY_RIGHT_ARROW},
-  {"RIGHTARROW", KEY_RIGHT_ARROW},
-  {"PAGEUP", KEY_PAGE_UP},
-  {"PAGE_UP", KEY_PAGE_UP},
-  {"PAGEDOWN", KEY_PAGE_DOWN},
-  {"PAGE_DOWN", KEY_PAGE_DOWN},
-  {"HOME", KEY_HOME},
-  {"END", KEY_END},
-  {"CAPSLOCK", KEY_CAPS_LOCK},
-  {"CAPS", KEY_CAPS_LOCK},
-  {"NUMLOCK", KEY_NUM_LOCK},
-  {"SCROLLLOCK", KEY_SCROLL_LOCK},
+  {"APP",         KEY_APPLICATION},
+  {"BACKSPACE",   KEY_BACKSPACE},
+  {"BKSP",        KEY_BACKSPACE},
+  {"BREAK",       KEY_PAUSE},
+  {"CAPS",        KEY_CAPS_LOCK},
+  {"CAPSLOCK",    KEY_CAPS_LOCK},
+  {"DEL",         KEY_DELETE},
+  {"DELETE",      KEY_DELETE},
+  {"DOWN",        KEY_DOWN_ARROW},
+  {"DOWNARROW",   KEY_DOWN_ARROW},
+  {"END",         KEY_END},
+  {"ENTER",       KEY_RETURN},
+  {"ESC",         KEY_ESC},
+  {"ESCAPE",      KEY_ESC},
+  {"F1",          KEY_F1},
+  {"F10",         KEY_F10},
+  {"F11",         KEY_F11},
+  {"F12",         KEY_F12},
+  {"F2",          KEY_F2},
+  {"F3",          KEY_F3},
+  {"F4",          KEY_F4},
+  {"F5",          KEY_F5},
+  {"F6",          KEY_F6},
+  {"F7",          KEY_F7},
+  {"F8",          KEY_F8},
+  {"F9",          KEY_F9},
+  {"HOME",        KEY_HOME},
+  {"INS",         KEY_INSERT},
+  {"INSERT",      KEY_INSERT},
+  {"LEFT",        KEY_LEFT_ARROW},
+  {"LEFTARROW",   KEY_LEFT_ARROW},
+  {"MENU",        KEY_APPLICATION},
+  {"NUMLOCK",     KEY_NUM_LOCK},
+  {"PAGE_DOWN",   KEY_PAGE_DOWN},
+  {"PAGE_UP",     KEY_PAGE_UP},
+  {"PAGEDOWN",    KEY_PAGE_DOWN},
+  {"PAGEUP",      KEY_PAGE_UP},
+  {"PAUSE",       KEY_PAUSE},
+  {"PRINT",       KEY_PRINT_SCREEN},
   {"PRINTSCREEN", KEY_PRINT_SCREEN},
-  {"PRINTSCRN", KEY_PRINT_SCREEN},
-  {"PRINT", KEY_PRINT_SCREEN},
-  {"PAUSE", KEY_PAUSE},
-  {"BREAK", KEY_PAUSE},
-  {"APP", KEY_APPLICATION},
-  {"MENU", KEY_APPLICATION},
-  {"SPACE", ' '},
-  {"F1", KEY_F1},
-  {"F2", KEY_F2},
-  {"F3", KEY_F3},
-  {"F4", KEY_F4},
-  {"F5", KEY_F5},
-  {"F6", KEY_F6},
-  {"F7", KEY_F7},
-  {"F8", KEY_F8},
-  {"F9", KEY_F9},
-  {"F10", KEY_F10},
-  {"F11", KEY_F11},
-  {"F12", KEY_F12},
+  {"PRINTSCRN",   KEY_PRINT_SCREEN},
+  {"RETURN",      KEY_RETURN},
+  {"RIGHT",       KEY_RIGHT_ARROW},
+  {"RIGHTARROW",  KEY_RIGHT_ARROW},
+  {"SCROLLLOCK",  KEY_SCROLL_LOCK},
+  {"SPACE",       ' '},
+  {"TAB",         KEY_TAB},
+  {"UP",          KEY_UP_ARROW},
+  {"UPARROW",     KEY_UP_ARROW},
 };
 constexpr size_t FAST_DUCKY_KEYMAP_SIZE = sizeof(FAST_DUCKY_KEYMAP) / sizeof(FAST_DUCKY_KEYMAP[0]);
 
@@ -1817,12 +1821,24 @@ static inline bool fastStrCaseStartsWith(const char *str, size_t len, const char
   return (strncasecmp(str, prefix, prefixLen) == 0);
 }
 
+// FIX: O(log n) binary search replaces O(n) linear scan.
 uint8_t fastResolveDuckyKey(const char *token, size_t len) {
   if (!token || len == 0) return 0;
 
-  for (size_t i = 0; i < FAST_DUCKY_KEYMAP_SIZE; i++) {
-    if (fastStrCaseEquals(token, len, FAST_DUCKY_KEYMAP[i].name)) {
-      return FAST_DUCKY_KEYMAP[i].scancode;
+  int lo = 0, hi = (int)FAST_DUCKY_KEYMAP_SIZE - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    // Compare first `len` chars; then disambiguate on full key name length.
+    int cmp = strncasecmp(token, FAST_DUCKY_KEYMAP[mid].name, len);
+    if (cmp == 0) {
+      size_t keyLen = strlen(FAST_DUCKY_KEYMAP[mid].name);
+      if (keyLen == len) return FAST_DUCKY_KEYMAP[mid].scancode; // exact match
+      if (keyLen > len)  hi = mid - 1; // token is prefix of this key, search left
+      else               lo = mid + 1; // key is shorter than token, search right
+    } else if (cmp < 0) {
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
     }
   }
 
@@ -1852,25 +1868,54 @@ bool executeDuckyCommandLineFast(const char *line, size_t len, int defaultDelay)
   if (fastStrCaseStartsWith(line, len, "REM", 3)) return false;
 
   if (fastStrCaseStartsWith(line, len, "STRING ", 7)) {
+    // FIX: Burst throttle and vTaskDelay now applied to STRING (same as BLOCK).
     const char *payload = line + 7;
     size_t payloadLen = len - 7;
+    int charDelay  = clampInt(typeDelay,    0,   40);
+    int batchSize  = clampInt(burstChars,   6,   96);
+    int batchPause = clampInt(burstPauseMs, 0,  120);
+    int sincePause = 0;
     for (size_t c = 0; c < payloadLen; c++) {
       if (stopScriptFlag) break;
       Keyboard.write(static_cast<uint8_t>(payload[c]));
-      if (typeDelay > 0) delay(typeDelay);
+      if (charDelay > 0) vTaskDelay(pdMS_TO_TICKS(charDelay));
+      if (++sincePause >= batchSize) {
+        sincePause = 0;
+        if (batchPause > 0) vTaskDelay(pdMS_TO_TICKS(batchPause));
+        vTaskDelay(1);
+      }
     }
   } else if (fastStrCaseStartsWith(line, len, "STRINGLN ", 9)) {
+    // FIX: Same burst throttle applied to STRINGLN.
     const char *payload = line + 9;
     size_t payloadLen = len - 9;
+    int charDelay  = clampInt(typeDelay,    0,   40);
+    int batchSize  = clampInt(burstChars,   6,   96);
+    int batchPause = clampInt(burstPauseMs, 0,  120);
+    int sincePause = 0;
     for (size_t c = 0; c < payloadLen; c++) {
       if (stopScriptFlag) break;
       Keyboard.write(static_cast<uint8_t>(payload[c]));
-      if (typeDelay > 0) delay(typeDelay);
+      if (charDelay > 0) vTaskDelay(pdMS_TO_TICKS(charDelay));
+      if (++sincePause >= batchSize) {
+        sincePause = 0;
+        if (batchPause > 0) vTaskDelay(pdMS_TO_TICKS(batchPause));
+        vTaskDelay(1);
+      }
     }
     keyboardTap(KEY_RETURN);
   } else if (fastStrCaseStartsWith(line, len, "DELAY ", 6)) {
     int d = atoi(line + 6);
-    if (d > 0) delay(d);
+    if (d > 0) vTaskDelay(pdMS_TO_TICKS(d));
+  } else if (fastStrCaseStartsWith(line, len, "WAIT_BUTTON ", 12)) {
+    // FIX: Pause script execution until BOOT button (GPIO 0) is pressed or timeout.
+    int timeoutMs = atoi(line + 12);
+    if (timeoutMs <= 0) timeoutMs = 10000;
+    uint32_t start = millis();
+    while (!stopScriptFlag && (millis() - start < (uint32_t)timeoutMs)) {
+      if (digitalRead(0) == LOW) break; // BOOT button is active-LOW
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
   } else if (fastStrCaseStartsWith(line, len, "MOUSE_MOVE_ABS ", 15) || fastStrCaseStartsWith(line, len, "MOUSEMOVEABS ", 13)) {
     size_t offset = (line[5] == '_') ? 15 : 13;
     const char *p = line + offset;
@@ -4257,6 +4302,9 @@ void registerRoutes() {
 
 void setup() {
   Serial.begin(115200);
+
+  // BOOT button (GPIO 0) used by WAIT_BUTTON Ducky command
+  pinMode(0, INPUT_PULLUP);
 
   pixels.begin();
   pixels.setBrightness(clampInt(ledBrightness, 0, 255));
