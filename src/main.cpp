@@ -884,7 +884,14 @@ String calculateTotp(const String &secretBase32, uint64_t epochSeconds, int peri
   mbedtls_md_context_t md_ctx;
   mbedtls_md_init(&md_ctx);
   const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-  mbedtls_md_setup(&md_ctx, md_info, 1);
+  if (!md_info) {
+    mbedtls_md_free(&md_ctx);
+    return "000000";
+  }
+  if (mbedtls_md_setup(&md_ctx, md_info, 1) != 0) {
+    mbedtls_md_free(&md_ctx);
+    return "000000";
+  }
   mbedtls_md_hmac_starts(&md_ctx, keyBytes, keyLen);
   mbedtls_md_hmac_update(&md_ctx, msg, sizeof(msg));
   mbedtls_md_hmac_finish(&md_ctx, hmacRes);
@@ -4183,6 +4190,16 @@ void registerRoutes() {
       return;
     }
     touchVaultActivity();
+
+    if (request->hasParam("epoch")) {
+      uint64_t clientEpoch = strtoull(request->getParam("epoch")->value().c_str(), nullptr, 10);
+      if (clientEpoch > 1700000000ULL) {
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(clientEpoch);
+        tv.tv_usec = 0;
+        settimeofday(&tv, nullptr);
+      }
+    }
 
     DynamicJsonDocument itemsDoc(8192);
     if (deserializeJson(itemsDoc, vaultCachedJson) != DeserializationError::Ok) {

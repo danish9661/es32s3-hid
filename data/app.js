@@ -2856,7 +2856,8 @@ async function refreshVaultView() {
 
 async function loadVaultEntries() {
   try {
-    const res = await api("/api/vault/entries");
+    const epoch = Math.floor(Date.now() / 1000);
+    const res = await api(`/api/vault/entries?epoch=${epoch}`);
     if (!res.ok) {
       if (res.status === 403) {
         refreshVaultView();
