@@ -556,6 +556,13 @@ void USBHIDFIDO::handleCbor(uint32_t cid, const uint8_t *data, size_t len) {
     return;
   }
 
+  if (ctap2Cmd == 0x0B) { // authenticatorSelection
+    CborWriter resp;
+    resp.writeMap(0);
+    sendCborResponse(cid, CTAP2_OK, resp.buf.data(), resp.buf.size());
+    return;
+  }
+
   if (ctap2Cmd == 0x0C) { // authenticatorLargeBlobs
     handleLargeBlob(cid, data, len);
     return;
@@ -707,15 +714,8 @@ void USBHIDFIDO::executeGetAssertion() {
       cred = FidoStore::findCredential(id);
       if (cred) break;
     }
-  }
-  if (!cred && !pendingReq.rpId.isEmpty()) {
+  } else if (!pendingReq.rpId.isEmpty()) {
     cred = FidoStore::findCredentialByRp(pendingReq.rpId);
-  }
-  if (!cred) {
-    auto &all = FidoStore::getAllCredentials();
-    if (!all.empty()) {
-      cred = &all[0];
-    }
   }
 
   if (!cred) {
