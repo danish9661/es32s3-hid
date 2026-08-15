@@ -3129,6 +3129,20 @@ function bindVaultEvents() {
     }
   });
 
+  qs("vault-unlock-pass")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      qs("vault-unlock-btn")?.click();
+    }
+  });
+
+  qs("vault-setup-pass-confirm")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      qs("vault-setup-btn")?.click();
+    }
+  });
+
   qs("vault-lock-btn")?.addEventListener("click", async () => {
     try {
       await api("/api/vault/lock", { method: "POST" });
@@ -3215,6 +3229,7 @@ function setupTabs() {
     }
 
     activeTab = tab;
+    sessionStorage.setItem("active_tab", tab);
     buttons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     views.forEach((v) => v.classList.toggle("active", v.id === `view-${tab}`));
 
@@ -3231,6 +3246,11 @@ function setupTabs() {
   buttons.forEach((button) => {
     button.addEventListener("click", () => activate(button.dataset.tab));
   });
+
+  const savedTab = sessionStorage.getItem("active_tab");
+  if (savedTab && document.getElementById(`view-${savedTab}`)) {
+    activate(savedTab);
+  }
 }
 
 function bindQuickActionButtons() {

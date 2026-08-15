@@ -620,8 +620,49 @@ bool aes256GcmDecrypt(
   return (ret == 0);
 }
 
+void saveVaultToNvs(const uint8_t *fullData, size_t dataLen) {
+  Preferences prefs;
+  if (prefs.begin("vault_nvs", false)) {
+    prefs.putBytes("vdata", fullData, dataLen);
+    prefs.putBool("has_vault", true);
+    prefs.end();
+  }
+}
+
+bool restoreVaultFromNvs() {
+  Preferences prefs;
+  if (!prefs.begin("vault_nvs", true)) return false;
+  if (!prefs.getBool("has_vault", false)) {
+    prefs.end();
+    return false;
+  }
+  size_t len = prefs.getBytesLength("vdata");
+  if (len < sizeof(VaultHeader)) {
+    prefs.end();
+    return false;
+  }
+  uint8_t *buf = static_cast<uint8_t *>(malloc(len));
+  if (!buf) {
+    prefs.end();
+    return false;
+  }
+  prefs.getBytes("vdata", buf, len);
+  prefs.end();
+
+  File f = LittleFS.open(VAULT_FILE, "w");
+  if (f) {
+    f.write(buf, len);
+    f.close();
+    free(buf);
+    return true;
+  }
+  free(buf);
+  return false;
+}
+
 bool isVaultInitialized() {
-  return LittleFS.exists(VAULT_FILE);
+  if (LittleFS.exists(VAULT_FILE)) return true;
+  return restoreVaultFromNvs();
 }
 
 bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
@@ -651,12 +692,6 @@ bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
     return false;
   }
 
-  File f = LittleFS.open(VAULT_FILE, "w");
-  if (!f) {
-    free(cipherBuf);
-    return false;
-  }
-
   VaultHeader hdr;
   memcpy(hdr.magic, "VLT1", 4);
   memcpy(hdr.salt, salt, VAULT_SALT_LEN);
@@ -664,11 +699,27 @@ bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
   memcpy(hdr.tag, tag, VAULT_TAG_LEN);
   hdr.ciphertextLen = static_cast<uint32_t>(plainLen);
 
-  f.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
-  if (plainLen > 0) {
-    f.write(cipherBuf, plainLen);
+  File f = LittleFS.open(VAULT_FILE, "w");
+  if (f) {
+    f.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
+    if (plainLen > 0) {
+      f.write(cipherBuf, plainLen);
+    }
+    f.close();
   }
-  f.close();
+
+  // Mirror encrypted ciphertext blob into NVS so LittleFS flashing doesn't erase it
+  size_t totalDataLen = sizeof(VaultHeader) + plainLen;
+  uint8_t *nvsBlob = static_cast<uint8_t *>(malloc(totalDataLen));
+  if (nvsBlob) {
+    memcpy(nvsBlob, &hdr, sizeof(VaultHeader));
+    if (plainLen > 0) {
+      memcpy(nvsBlob + sizeof(VaultHeader), cipherBuf, plainLen);
+    }
+    saveVaultToNvs(nvsBlob, totalDataLen);
+    free(nvsBlob);
+  }
+
   free(cipherBuf);
   return true;
 }
@@ -4392,9 +4443,49 @@ void setup() {
   Serial.println("Server started");
 }
 
+void checkPhysical2faTrigger() {
+  static uint32_t lastBtnPress = 0;
+  // BOOT button is GPIO 0 (active LOW)
+  if (digitalRead(0) == LOW) {
+    if (millis() - lastBtnPress > 1500) {
+      lastBtnPress = millis();
+      // If vault is unlocked, find the first TOTP entry and auto-type it over USB HID
+      if (vaultUnlocked) {
+        DynamicJsonDocument itemsDoc(8192);
+        if (deserializeJson(itemsDoc, vaultCachedJson) == DeserializationError::Ok && itemsDoc.is<JsonArray>()) {
+          JsonArray arr = itemsDoc.as<JsonArray>();
+          for (JsonObject obj : arr) {
+            String type = obj["type"] | "totp";
+            if (type == "totp" && obj.containsKey("secret")) {
+              time_t nowSec = time(nullptr);
+              int period = obj["period"] | 30;
+              int digits = obj["digits"] | 6;
+              String otp = calculateTotp(obj["secret"].as<String>(), nowSec, period, digits);
+              for (size_t c = 0; c < otp.length(); c++) {
+                Keyboard.write(static_cast<uint8_t>(otp[c]));
+                if (typeDelay > 0) delay(typeDelay);
+              }
+              delay(10);
+              keyboardTap(KEY_RETURN);
+              pixels.setPixelColor(0, pixels.Color(0, 255, 0));
+              pixels.show();
+              delay(120);
+              pixels.setPixelColor(0, pixels.Color(0, 0, 0));
+              pixels.show();
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 void loop() {
   static uint32_t lastPrune = 0;
   static uint32_t lastKvmBindRefresh = 0;
+
+  checkPhysical2faTrigger();
 
   if (!activeSessionToken.isEmpty() && isSessionExpired()) {
     clearSession();
@@ -4411,5 +4502,6 @@ void loop() {
     lastKvmBindRefresh = now;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  vTaskDelay(pdMS_TO_TICKS(25));
 }
+
