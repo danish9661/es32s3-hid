@@ -3187,6 +3187,19 @@ function bindVaultEvents() {
     } catch (_) {}
   });
 
+  qs("vault-reset-btn")?.addEventListener("click", async () => {
+    if (!confirm("⚠️ WARNING: Resetting the vault will erase the existing encrypted vault and any stored 2FA keys so you can set a brand new Master Password.\n\nAre you sure you want to reset?")) {
+      return;
+    }
+    try {
+      const res = await api("/api/vault/reset", { method: "POST" });
+      if (!res.ok) throw new Error();
+      await refreshVaultView();
+    } catch (_) {
+      alert("Failed to reset vault.");
+    }
+  });
+
   qs("vault-search-input")?.addEventListener("input", renderVaultEntries);
   qs("vault-add-item-btn")?.addEventListener("click", () => openVaultModal(null));
   qs("vault-modal-close")?.addEventListener("click", closeVaultModal);

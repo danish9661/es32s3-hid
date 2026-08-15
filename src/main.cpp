@@ -4123,6 +4123,20 @@ void registerRoutes() {
     }
   );
 
+  server.on("/api/vault/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    lockVault();
+    if (LittleFS.exists(VAULT_FILE)) {
+      LittleFS.remove(VAULT_FILE);
+    }
+    Preferences prefs;
+    if (prefs.begin("vault_nvs", false)) {
+      prefs.clear();
+      prefs.end();
+    }
+    request->send(200, "application/json", "{\"ok\":true,\"reset\":true}");
+  });
+
   server.on("/api/vault/lock", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     lockVault();
