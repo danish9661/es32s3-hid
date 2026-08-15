@@ -500,7 +500,17 @@ void USBHIDFIDO::handleCbor(uint32_t cid, const uint8_t *data, size_t len) {
     return;
   }
 
-  if (ctap2Cmd == 0x06) { // authenticatorReset
+  if (ctap2Cmd == 0x03) { // authenticatorGetNextAssertion
+    sendCborResponse(cid, CTAP2_ERR_NOT_ALLOWED, nullptr, 0);
+    return;
+  }
+
+  if (ctap2Cmd == 0x06) { // authenticatorClientPIN (PIN not configured/needed)
+    sendCborResponse(cid, CTAP2_ERR_UNSUPPORTED_OPTION, nullptr, 0);
+    return;
+  }
+
+  if (ctap2Cmd == 0x07) { // authenticatorReset
     pendingReq.cid = cid;
     pendingReq.cmd = CTAPHID_CBOR;
     pendingReq.ctap2Cmd = ctap2Cmd;
@@ -508,7 +518,7 @@ void USBHIDFIDO::handleCbor(uint32_t cid, const uint8_t *data, size_t len) {
     waitingForTouch = true;
     pendingAction = FIDO_ACTION_RESET;
 
-    // Send keepalive so Windows does not time out while waiting for touch
+    // Send keepalive so host does not time out while waiting for touch
     uint8_t statusUp = 0x01; // USER_PRESENCE_NEEDED
     sendCtapPacket(cid, CTAPHID_KEEPALIVE, &statusUp, 1);
     return;

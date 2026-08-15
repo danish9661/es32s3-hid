@@ -4746,12 +4746,23 @@ void checkPhysical2faTrigger() {
   // 1. FIDO2 / WebAuthn User Presence Touch Prompt
   if (FIDO.isWaitingForTouch()) {
     FIDO.checkTimeout();
-    // High-visibility rapid blinking Cyan LED while waiting for user touch
-    if (millis() - lastPulse > 180) {
+    FidoPendingAction act = FIDO.getPendingAction();
+    uint32_t interval = (act == FIDO_ACTION_RESET) ? 120 : 160;
+
+    // High-visibility rapid blinking with distinct Neon color per operation
+    if (millis() - lastPulse > interval) {
       lastPulse = millis();
       pulseState = !pulseState;
       if (pulseState) {
-        setStatus(0, 255, 255); // Full Brightness Cyan
+        if (act == FIDO_ACTION_MAKE_CREDENTIAL) {
+          setStatus(255, 0, 180); // Neon Electric Magenta / Pink (Registration)
+        } else if (act == FIDO_ACTION_GET_ASSERTION) {
+          setStatus(0, 255, 255); // Neon Electric Cyan / Blue (Login / Authentication)
+        } else if (act == FIDO_ACTION_RESET) {
+          setStatus(255, 80, 0);  // Neon Amber / Electric Orange (Factory Reset Warning)
+        } else {
+          setStatus(0, 255, 255); // Default Neon Cyan
+        }
       } else {
         setStatus(0, 0, 0);     // OFF
       }
@@ -4768,7 +4779,7 @@ void checkPhysical2faTrigger() {
       fidoSecurityKeyMode = !fidoSecurityKeyMode;
       persistSettings();
       if (fidoSecurityKeyMode) {
-        setStatus(0, 180, 255); // Cyan
+        setStatus(0, 180, 255); // Neon Cyan
         logSystem("[MODE] Switching to Dedicated FIDO2 Passkey Mode... Rebooting");
       } else {
         setStatus(0, 255, 0); // Green
@@ -4785,9 +4796,10 @@ void checkPhysical2faTrigger() {
       if (pressDuration < 2000) {
         // Short press: FIDO touch confirmation or Vault TOTP type
         if (FIDO.isWaitingForTouch()) {
+          String rp = FIDO.getPendingRpId();
           FIDO.confirmTouch();
-          logSystem("[FIDO2] User Presence confirmed for " + FIDO.getPendingRpId());
-          setStatus(0, 255, 0);
+          logSystem("[FIDO2] Physical Touch confirmed for " + (rp.isEmpty() ? "Passkey operation" : rp));
+          setStatus(0, 255, 60); // Neon Lime Green Confirmation
           delay(300);
           setStatus(fidoSecurityKeyMode ? 0 : 0, fidoSecurityKeyMode ? 180 : 255, fidoSecurityKeyMode ? 255 : 0);
         } else if (!fidoSecurityKeyMode && vaultUnlocked) {
