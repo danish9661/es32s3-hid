@@ -2656,8 +2656,8 @@ uint8_t parseMouseButton(const String &name) {
 }
 
 void registerRoutes() {
-  server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("max-age=300");
-  server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("max-age=300");
+  server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("public, max-age=86400, must-revalidate");
+  server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("public, max-age=86400, must-revalidate");
 
   server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (LittleFS.exists("/favicon.ico")) {
@@ -2687,7 +2687,9 @@ void registerRoutes() {
       return;
     }
 
-    request->send(LittleFS, "/login.html", "text/html");
+    AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/login.html", "text/html");
+    response->addHeader("Cache-Control", "no-cache, must-revalidate");
+    request->send(response);
   });
 
   server.on("/app", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2701,7 +2703,9 @@ void registerRoutes() {
       return;
     }
 
-    request->send(LittleFS, "/app.html", "text/html");
+    AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.html", "text/html");
+    response->addHeader("Cache-Control", "no-cache, must-revalidate");
+    request->send(response);
   });
 
   server.on("/api/login_status", HTTP_GET, [](AsyncWebServerRequest *request) {
