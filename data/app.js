@@ -115,19 +115,32 @@ function setPresetSegment(name) {
 
   track.setAttribute("data-active", name);
 
-  // Position indicator over the correct segment
-  const idx = SEG_ORDER.indexOf(name);
-  const segW = 100 / SEG_ORDER.length;
-  const trackPad = 4; // px padding inside track
-  indicator.style.left  = `calc(${idx * segW}% + ${trackPad}px)`;
-  indicator.style.width = `calc(${segW}% - ${trackPad * 2 / SEG_ORDER.length}px - ${trackPad}px)`;
+  // Use actual pixel rects — reliable regardless of padding/border/zoom
+  const btn = qs(`seg-${name}`);
+  if (btn) {
+    const trackRect = track.getBoundingClientRect();
+    const btnRect   = btn.getBoundingClientRect();
+    indicator.style.left  = (btnRect.left - trackRect.left) + "px";
+    indicator.style.width = btnRect.width + "px";
+  }
 
   // Update OS note
   const note = qs("preset-os-note");
   if (note) {
-    note.textContent = PRESET_OS_NOTES[name] || "";
-    note.classList.toggle("visible", !!PRESET_OS_NOTES[name]);
+    const text = PRESET_OS_NOTES[name] || "";
+    note.textContent = text;
+    note.classList.toggle("visible", !!text);
   }
+}
+
+function detectActivePreset(delay, burst, burstPause, lineDelay) {
+  for (const [name, p] of Object.entries(SPEED_PRESETS)) {
+    if (p.delay === delay && p.burst === burst &&
+        p.burstPause === burstPause && p.lineDelay === lineDelay) {
+      return name;
+    }
+  }
+  return "custom";
 }
 
 function applySpeedPreset(name) {
@@ -155,7 +168,7 @@ function bindSpeedPresets() {
     if (!btn) return;
     btn.addEventListener("click", () => {
       if (name === "custom") {
-        setPresetSegment("custom"); // just highlight, don't change sliders
+        setPresetSegment("custom");
       } else {
         applySpeedPreset(name);
       }
@@ -170,8 +183,8 @@ function bindSpeedPresets() {
     });
   });
 
-  // Default to Balanced on first paint
-  setPresetSegment("balanced");
+  // Set Balanced as default; use requestAnimationFrame so DOM is painted
+  requestAnimationFrame(() => setPresetSegment("balanced"));
 }
 
 const keyboardLayout = [
@@ -2671,6 +2684,18 @@ async function loadSettings() {
     updateSliderReadout("burst-pause", " ms");
     updateSliderReadout("line-delay", " ms");
     updateSliderReadout("kvm-mouse-smooth", "%");
+
+    // Detect which preset matches loaded values and highlight it
+    const activePreset = detectActivePreset(
+      d.delay ?? 6, d.burst_chars ?? 24, d.burst_pause ?? 10, d.line_delay ?? 40
+    );
+    requestAnimationFrame(() => setPresetSegment(activePreset));
+
+    // Show firmware version badge
+    if (d.fw_version) {
+      const badge = qs("fw-version-badge");
+      if (badge) badge.textContent = `FW: v${d.fw_version}`;
+    }
 
     updateVendorPresetSelectionFromFields();
     setText("settings-status", "Settings loaded.");

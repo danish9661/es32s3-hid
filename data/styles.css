@@ -219,6 +219,21 @@ select.input {
   background: rgba(251, 191, 36, 0.12);
 }
 
+.badge-ver {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--accent-cyan);
+  border-color: rgba(0, 240, 255, 0.2);
+  background: rgba(0, 240, 255, 0.06);
+  letter-spacing: 0.05em;
+}
+
+.badge-ip {
+  color: var(--text);
+  font-family: monospace;
+  font-size: 11px;
+}
+
 .panel {
   background: var(--surface);
   backdrop-filter: blur(16px);
@@ -1301,7 +1316,7 @@ select.input {
 .speed-seg-track[data-active="human"]     #seg-human     { color: #34d399; }
 .speed-seg-track[data-active="custom"]    #seg-custom    { color: var(--text); }
 
-.seg-custom { border-left: 1px solid var(--line); }
+.seg-custom { opacity: 0.8; }
 
 .preset-os-note {
   font-size: 11px;
@@ -1320,8 +1335,8 @@ select.input {
 /* Slider Grid */
 .slider-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 14px 20px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 28px;
   margin-bottom: 4px;
 }
 

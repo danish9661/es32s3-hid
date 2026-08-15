@@ -100,6 +100,9 @@
 #endif
 
 // --- BOARD / DEVICE CONFIG ---
+#define FIRMWARE_VERSION "2.3.0"
+#define BUILD_DATE       __DATE__ " " __TIME__
+
 #ifndef STATUS_LED_PIN
 #define STATUS_LED_PIN 38
 #endif
@@ -3861,6 +3864,9 @@ void registerRoutes() {
     doc["line_delay"] = lineDelayMs;
     doc["bright"] = ledBrightness;
     doc["kvm_mouse_smooth"] = kvmMouseSmoothness;
+
+    doc["fw_version"] = FIRMWARE_VERSION;
+    doc["build_date"] = BUILD_DATE;
 
     String json;
     serializeJson(doc, json);
