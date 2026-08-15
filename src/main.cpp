@@ -8,6 +8,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Update.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
 #include "USB.h"
 #include "USBMSC.h"
 #include "USBHIDKeyboard.h"
@@ -1298,81 +1299,147 @@ void persistSettings() {
   out["kvm_mouse_smooth"] = kvmMouseSmoothness;
 
   File file = LittleFS.open(SETTINGS_FILE, "w");
-  if (!file) {
-    Serial.println("Failed to open settings file for write");
-    return;
+  if (file) {
+    serializeJson(out, file);
+    file.close();
   }
 
-  serializeJson(out, file);
-  file.close();
+  // Persist backup to hardware NVS flash partition
+  Preferences prefs;
+  if (prefs.begin("sysconfig", false)) {
+    prefs.putString("ap_ssid", ap_ssid);
+    prefs.putString("ap_pass", ap_pass);
+    prefs.putString("sta_ssid", sta_ssid);
+    prefs.putString("sta_pass", sta_pass);
+    prefs.putString("admin_user", admin_user);
+    prefs.putString("admin_pass", admin_pass);
+    prefs.putBool("rate_limit", loginRateLimitEnabled);
+    prefs.putBool("proxy_auth", proxyAuthEnabled);
+    prefs.putString("proxy_tok", proxyAuthToken);
+    prefs.putBool("kvm_en", kvmEnabled);
+    prefs.putUShort("kvm_port", kvmPort);
+    prefs.putString("kvm_ip", kvmAllowedIp);
+    prefs.putUShort("usb_vid", usbVendorId);
+    prefs.putUShort("usb_pid", usbProductId);
+    prefs.putString("usb_vn", usbVendorName);
+    prefs.putString("usb_pn", usbProductName);
+    prefs.putBool("usb_msc", usbMscEnabled);
+    prefs.putString("usb_lbl", usbMscVolumeLabel);
+    prefs.putInt("delay", typeDelay);
+    prefs.putInt("burst_c", burstChars);
+    prefs.putInt("burst_p", burstPauseMs);
+    prefs.putInt("line_d", lineDelayMs);
+    prefs.putInt("bright", ledBrightness);
+    prefs.putInt("kvm_ms", kvmMouseSmoothness);
+    prefs.end();
+  }
+}
+
+bool loadSettingsNVS() {
+  Preferences prefs;
+  if (!prefs.begin("sysconfig", true)) return false;
+  if (!prefs.isKey("admin_user") && !prefs.isKey("sta_ssid")) {
+    prefs.end();
+    return false;
+  }
+
+  ap_ssid = prefs.getString("ap_ssid", ap_ssid);
+  ap_pass = prefs.getString("ap_pass", ap_pass);
+  sta_ssid = prefs.getString("sta_ssid", sta_ssid);
+  sta_pass = prefs.getString("sta_pass", sta_pass);
+  admin_user = prefs.getString("admin_user", admin_user);
+  admin_pass = prefs.getString("admin_pass", admin_pass);
+  loginRateLimitEnabled = prefs.getBool("rate_limit", loginRateLimitEnabled);
+  proxyAuthEnabled = prefs.getBool("proxy_auth", proxyAuthEnabled);
+  proxyAuthToken = prefs.getString("proxy_tok", proxyAuthToken);
+  kvmEnabled = prefs.getBool("kvm_en", kvmEnabled);
+  kvmPort = prefs.getUShort("kvm_port", kvmPort);
+  kvmAllowedIp = prefs.getString("kvm_ip", kvmAllowedIp);
+  usbVendorId = prefs.getUShort("usb_vid", usbVendorId);
+  usbProductId = prefs.getUShort("usb_pid", usbProductId);
+  usbVendorName = prefs.getString("usb_vn", usbVendorName);
+  usbProductName = prefs.getString("usb_pn", usbProductName);
+  usbMscEnabled = prefs.getBool("usb_msc", usbMscEnabled);
+  usbMscVolumeLabel = prefs.getString("usb_lbl", usbMscVolumeLabel);
+  typeDelay = prefs.getInt("delay", typeDelay);
+  burstChars = prefs.getInt("burst_c", burstChars);
+  burstPauseMs = prefs.getInt("burst_p", burstPauseMs);
+  lineDelayMs = prefs.getInt("line_d", lineDelayMs);
+  ledBrightness = prefs.getInt("bright", ledBrightness);
+  kvmMouseSmoothness = prefs.getInt("kvm_ms", kvmMouseSmoothness);
+  prefs.end();
+  return true;
 }
 
 void loadSettings() {
-  if (!LittleFS.exists(SETTINGS_FILE)) {
-    pixels.setBrightness(clampInt(ledBrightness, 0, 255));
-    return;
+  bool loadedFromFile = false;
+  if (LittleFS.exists(SETTINGS_FILE)) {
+    File file = LittleFS.open(SETTINGS_FILE, "r");
+    if (file) {
+      DynamicJsonDocument doc(2304);
+      DeserializationError err = deserializeJson(doc, file);
+      file.close();
+
+      if (!err) {
+        if (doc.containsKey("ap_ssid")) ap_ssid = doc["ap_ssid"].as<String>();
+        if (doc.containsKey("ap_pass")) ap_pass = doc["ap_pass"].as<String>();
+        if (doc.containsKey("sta_ssid")) sta_ssid = doc["sta_ssid"].as<String>();
+        if (doc.containsKey("sta_pass")) sta_pass = doc["sta_pass"].as<String>();
+        if (doc.containsKey("admin_user")) admin_user = doc["admin_user"].as<String>();
+        if (doc.containsKey("admin_pass")) admin_pass = doc["admin_pass"].as<String>();
+
+        loginRateLimitEnabled = doc["login_rate_limit"] | loginRateLimitEnabled;
+        proxyAuthEnabled = doc["proxy_auth_enabled"] | proxyAuthEnabled;
+        if (doc.containsKey("proxy_auth_token")) proxyAuthToken = doc["proxy_auth_token"].as<String>();
+
+        if (doc.containsKey("kvm_enabled")) kvmEnabled = doc["kvm_enabled"].as<bool>();
+        kvmPort = static_cast<uint16_t>(clampInt(doc["kvm_port"] | static_cast<int>(kvmPort), 1, 65535));
+        if (doc.containsKey("kvm_allowed_ip")) kvmAllowedIp = doc["kvm_allowed_ip"].as<String>();
+        kvmAllowedIp = normalizeOptionalIp(kvmAllowedIp);
+
+        if (doc.containsKey("usb_vid")) {
+          uint16_t parsed = usbVendorId;
+          if (parseUint16JsonValue(doc["usb_vid"], parsed)) usbVendorId = parsed;
+        }
+        if (doc.containsKey("usb_pid")) {
+          uint16_t parsed = usbProductId;
+          if (parseUint16JsonValue(doc["usb_pid"], parsed)) usbProductId = parsed;
+        }
+        if (doc.containsKey("usb_vendor_name")) usbVendorName = doc["usb_vendor_name"].as<String>();
+        if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
+        if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
+        if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
+
+        usbVendorName.trim();
+        usbProductName.trim();
+        if (usbVendorName.isEmpty()) usbVendorName = "Espressif";
+        if (usbProductName.isEmpty()) usbProductName = "ESP32-S3 HID Console";
+        if (usbVendorName.length() > 48) usbVendorName = usbVendorName.substring(0, 48);
+        if (usbProductName.length() > 48) usbProductName = usbProductName.substring(0, 48);
+
+        typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
+        burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
+        burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
+        lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
+        ledBrightness = clampInt(doc["bright"] | ledBrightness, 0, 255);
+        kvmMouseSmoothness = clampInt(doc["kvm_mouse_smooth"] | kvmMouseSmoothness, 25, 250);
+
+        if (proxyAuthToken.length() > 128) proxyAuthToken = proxyAuthToken.substring(0, 128);
+        if (proxyAuthToken.length() < 16) proxyAuthEnabled = false;
+
+        loadedFromFile = true;
+      }
+    }
   }
 
-  File file = LittleFS.open(SETTINGS_FILE, "r");
-  if (!file) {
-    Serial.println("Failed to open settings file for read");
-    return;
+  if (!loadedFromFile) {
+    if (loadSettingsNVS()) {
+      Serial.println("Restored settings from persistent NVS flash!");
+      persistSettings();
+    }
+  } else {
+    persistSettings();
   }
-
-  DynamicJsonDocument doc(2304);
-  DeserializationError err = deserializeJson(doc, file);
-  file.close();
-
-  if (err) {
-    Serial.printf("Settings parse error: %s\n", err.c_str());
-    return;
-  }
-
-  if (doc.containsKey("ap_ssid")) ap_ssid = doc["ap_ssid"].as<String>();
-  if (doc.containsKey("ap_pass")) ap_pass = doc["ap_pass"].as<String>();
-  if (doc.containsKey("sta_ssid")) sta_ssid = doc["sta_ssid"].as<String>();
-  if (doc.containsKey("sta_pass")) sta_pass = doc["sta_pass"].as<String>();
-  if (doc.containsKey("admin_user")) admin_user = doc["admin_user"].as<String>();
-  if (doc.containsKey("admin_pass")) admin_pass = doc["admin_pass"].as<String>();
-
-  loginRateLimitEnabled = doc["login_rate_limit"] | loginRateLimitEnabled;
-  proxyAuthEnabled = doc["proxy_auth_enabled"] | proxyAuthEnabled;
-  if (doc.containsKey("proxy_auth_token")) proxyAuthToken = doc["proxy_auth_token"].as<String>();
-
-  if (doc.containsKey("kvm_enabled")) kvmEnabled = doc["kvm_enabled"].as<bool>();
-  kvmPort = static_cast<uint16_t>(clampInt(doc["kvm_port"] | static_cast<int>(kvmPort), 1, 65535));
-  if (doc.containsKey("kvm_allowed_ip")) kvmAllowedIp = doc["kvm_allowed_ip"].as<String>();
-  kvmAllowedIp = normalizeOptionalIp(kvmAllowedIp);
-
-  if (doc.containsKey("usb_vid")) {
-    uint16_t parsed = usbVendorId;
-    if (parseUint16JsonValue(doc["usb_vid"], parsed)) usbVendorId = parsed;
-  }
-  if (doc.containsKey("usb_pid")) {
-    uint16_t parsed = usbProductId;
-    if (parseUint16JsonValue(doc["usb_pid"], parsed)) usbProductId = parsed;
-  }
-  if (doc.containsKey("usb_vendor_name")) usbVendorName = doc["usb_vendor_name"].as<String>();
-  if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
-  if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
-  if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
-
-  usbVendorName.trim();
-  usbProductName.trim();
-  if (usbVendorName.isEmpty()) usbVendorName = "Espressif";
-  if (usbProductName.isEmpty()) usbProductName = "ESP32-S3 HID Console";
-  if (usbVendorName.length() > 48) usbVendorName = usbVendorName.substring(0, 48);
-  if (usbProductName.length() > 48) usbProductName = usbProductName.substring(0, 48);
-
-  typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
-  burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
-  burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
-  lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
-  ledBrightness = clampInt(doc["bright"] | ledBrightness, 0, 255);
-  kvmMouseSmoothness = clampInt(doc["kvm_mouse_smooth"] | kvmMouseSmoothness, 25, 250);
-
-  if (proxyAuthToken.length() > 128) proxyAuthToken = proxyAuthToken.substring(0, 128);
-  if (proxyAuthToken.length() < 16) proxyAuthEnabled = false;
 
   pixels.setBrightness(ledBrightness);
 }
