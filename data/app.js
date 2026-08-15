@@ -1794,10 +1794,10 @@ function bindOtaControls() {
         let countdown = 6;
         const countTimer = setInterval(() => {
           countdown--;
-          if (statusSpan) statusSpan.textContent = `Rebooting... refreshing in ${countdown}s`;
+          if (statusSpan) statusSpan.textContent = `Flash complete! Rebooting... redirecting in ${countdown}s`;
           if (countdown <= 0) {
             clearInterval(countTimer);
-            window.location.href = "/login";
+            window.location.replace("/login");
           }
         }, 1000);
       } else {
@@ -2805,7 +2805,7 @@ async function rebootDevice() {
     await api("/api/reboot", { method: "POST" });
     setText("settings-status", "Reboot command sent. Redirecting to login in 6 seconds...");
     setTimeout(() => {
-      window.location.href = "/login";
+      window.location.replace("/login");
     }, 6000);
   } catch (_) {
     setText("settings-status", "Failed to send reboot command.");
@@ -2816,7 +2816,46 @@ async function logout() {
   try {
     await api("/api/logout", { method: "POST" });
   } catch (_) {}
-  window.location.href = "/login";
+  window.location.replace("/login");
+}
+
+// --- SYSTEM LOGS CONSOLE ---
+let sysLogTimer = null;
+
+async function loadSystemLogs() {
+  const container = qs("syslog-container");
+  if (!container) return;
+  try {
+    const res = await api("/api/logs");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.logs || data.logs.length === 0) {
+      container.textContent = "[No logs recorded yet in circular buffer]";
+      return;
+    }
+    const isScrolledToBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 40;
+    container.textContent = data.logs.join("\n");
+    if (isScrolledToBottom) {
+      container.scrollTop = container.scrollHeight;
+    }
+  } catch (_) {}
+}
+
+function bindSystemLogs() {
+  qs("syslog-refresh-btn")?.addEventListener("click", loadSystemLogs);
+  qs("syslog-clear-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/logs/clear", { method: "POST" });
+      loadSystemLogs();
+    } catch (_) {}
+  });
+
+  if (sysLogTimer) clearInterval(sysLogTimer);
+  sysLogTimer = setInterval(() => {
+    if (activeTab === "settings" && qs("syslog-auto-refresh")?.checked) {
+      loadSystemLogs();
+    }
+  }, 1000);
 }
 
 // --- ENCRYPTED VAULT & 2FA AUTHENTICATOR CLIENT ---
@@ -3298,6 +3337,7 @@ function setupTabs() {
 
     if (tab === "settings") {
       loadSettings();
+      loadSystemLogs();
     } else if (tab === "kvm") {
       loadKvmStatus();
       loadActionFiles();
@@ -3493,6 +3533,7 @@ async function bootstrap() {
   bindTrackpad();
   bindAbsoluteMouse();
   bindOtaControls();
+  bindSystemLogs();
   bindKeyboardPreferenceControls();
   startMouseFlushLoop();
 
@@ -3518,6 +3559,7 @@ async function bootstrap() {
 window.addEventListener("beforeunload", () => {
   if (statusPollTimer) clearInterval(statusPollTimer);
   if (mouseFlushTimer) clearInterval(mouseFlushTimer);
+  if (sysLogTimer) clearInterval(sysLogTimer);
   stopScreenshotAutoRefresh();
   cleanupScreenshotObjectUrl();
 });

@@ -99,9 +99,25 @@
 #define KEY_F12 205
 #endif
 
-// --- BOARD / DEVICE CONFIG ---
-#define FIRMWARE_VERSION "2.3.0"
+#define FIRMWARE_VERSION "2.4.0"
 #define BUILD_DATE       __DATE__ " " __TIME__
+
+static constexpr size_t MAX_LOG_LINES = 120;
+static String sysLogs[MAX_LOG_LINES];
+static size_t sysLogHead = 0;
+static size_t sysLogCount = 0;
+
+void logSystem(const String &msg) {
+  unsigned long now = millis();
+  char timeBuf[24];
+  snprintf(timeBuf, sizeof(timeBuf), "[%02lu:%02lu.%03lu] ", (now / 60000) % 60, (now / 1000) % 60, now % 1000);
+  String line = String(timeBuf) + msg;
+  Serial.println(line);
+  
+  sysLogs[sysLogHead] = line;
+  sysLogHead = (sysLogHead + 1) % MAX_LOG_LINES;
+  if (sysLogCount < MAX_LOG_LINES) sysLogCount++;
+}
 
 #ifndef STATUS_LED_PIN
 #define STATUS_LED_PIN 38
@@ -4017,12 +4033,41 @@ void registerRoutes() {
     ESP.restart();
   });
 
+  server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    DynamicJsonDocument doc(16384);
+    JsonArray arr = doc.createNestedArray("logs");
+    size_t start = (sysLogCount < MAX_LOG_LINES) ? 0 : sysLogHead;
+    for (size_t i = 0; i < sysLogCount; i++) {
+      size_t idx = (start + i) % MAX_LOG_LINES;
+      arr.add(sysLogs[idx]);
+    }
+    doc["count"] = sysLogCount;
+    doc["uptime_sec"] = millis() / 1000;
+    doc["free_heap"] = ESP.getFreeHeap();
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on("/api/logs/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    sysLogHead = 0;
+    sysLogCount = 0;
+    request->send(200, "application/json", "{\"ok\":true}");
+  });
+
   server.on(
     "/api/ota",
     HTTP_POST,
     [](AsyncWebServerRequest *request) {
       if (!requireAuth(request)) return;
       bool shouldReboot = !Update.hasError();
+      if (shouldReboot) {
+        logSystem("[OTA] Binary flash successful! Initiating restart in 500ms...");
+      } else {
+        logSystem("[OTA] ERROR: Binary flash failed!");
+      }
       AsyncWebServerResponse *response = request->beginResponse(
         shouldReboot ? 200 : 500,
         "application/json",
@@ -4040,27 +4085,35 @@ void registerRoutes() {
 
       if (index == 0) {
         int cmd = U_FLASH;
+        String typeStr = "Firmware";
         if (request->hasParam("type")) {
           String type = request->getParam("type")->value();
           type.toLowerCase();
           if (type == "fs" || type == "littlefs" || type == "spiffs") {
             cmd = U_SPIFFS;
+            typeStr = "LittleFS / Web UI";
           }
         }
+        logSystem("[OTA] Starting " + typeStr + " upload: " + filename);
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) {
           Update.printError(Serial);
+          logSystem("[OTA] Update.begin failed!");
         }
       }
 
       if (!Update.hasError()) {
         if (Update.write(data, len) != len) {
           Update.printError(Serial);
+          logSystem("[OTA] Update.write error at index " + String(index));
         }
       }
 
       if (final) {
         if (!Update.end(true)) {
           Update.printError(Serial);
+          logSystem("[OTA] Update.end failed!");
+        } else {
+          logSystem("[OTA] Flash verified (" + String(index + len) + " bytes)");
         }
       }
     }

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ESP32-S3 HID Console</title>
-  <link rel="stylesheet" href="/styles.css?v=2.3.0">
+  <link rel="stylesheet" href="/styles.css?v=2.4.0">
 </head>
 <body>
   <div class="layout">
@@ -12,7 +12,7 @@
       <div class="brand">ESP32-S3 HID Console</div>
       <div class="topbar-right">
         <span id="fw-version-badge" class="badge badge-ver" title="Firmware version flashed on ESP32">FW: –</span>
-        <span id="ui-version-badge" class="badge badge-ver" title="Web UI (LittleFS) version">UI: v2.3.0</span>
+        <span id="ui-version-badge" class="badge badge-ver" title="Web UI (LittleFS) version">UI: v2.4.0</span>
         <span id="topbar-ip-badge" class="badge badge-ip">IP: Loading...</span>
         <span id="run-state" class="badge">Checking status...</span>
         <button id="stop-btn" class="btn-danger">Stop</button>
@@ -796,6 +796,26 @@
             </div>
           </div>
 
+          <!-- Live System Log Console -->
+          <h3 style="margin-top:28px;">📟 Live System & Event Log Console</h3>
+          <div class="network-info-card">
+            <div class="network-head">
+              <div>
+                <h4>ESP32 Realtime System Logs</h4>
+                <p class="small" style="margin:2px 0 0;">Circular RAM ring buffer recording OTA flash progress, vault operations, WiFi events, and USB status.</p>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <label class="checkbox-row" style="margin:0; font-size:12px;">
+                  <input id="syslog-auto-refresh" type="checkbox" checked>
+                  <span>Auto-Refresh (1s)</span>
+                </label>
+                <button type="button" id="syslog-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
+                <button type="button" id="syslog-clear-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Clear</button>
+              </div>
+            </div>
+            <div id="syslog-container" style="background:#070b14; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:12px; height:220px; overflow-y:auto; font-family:'JetBrains Mono', monospace; font-size:12px; line-height:1.6; color:#a5f3fc; white-space:pre-wrap;">Loading system logs...</div>
+          </div>
+
           <div class="settings-actions" style="margin-top:24px;">
             <button id="save-settings-btn" class="btn-primary">Save Settings</button>
             <button id="reboot-btn" class="btn-danger">Reboot Device</button>
@@ -816,6 +836,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=2.3.0"></script>
+  <script src="/app.js?v=2.4.0"></script>
 </body>
 </html>
