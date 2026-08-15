@@ -747,7 +747,7 @@
               </div>
               <div class="version-item">
                 <span class="version-label">Filesystem (LittleFS)</span>
-                <strong id="ota-ui-version-display" class="version-val">v2.3.0</strong>
+                <strong id="ota-ui-version-display" class="version-val">v2.4.0</strong>
               </div>
               <div class="version-item">
                 <span class="version-label">Build Timestamp</span>
@@ -802,7 +802,7 @@
             <div class="network-head">
               <div>
                 <h4>ESP32 Realtime System Logs</h4>
-                <p class="small" style="margin:2px 0 0;">Circular RAM ring buffer recording OTA flash progress, vault operations, WiFi events, and USB status.</p>
+                <p class="small" style="margin:2px 0 0;">Persistent LittleFS log file + circular RAM buffer + USB MSC Virtual Drive (<code>SYSTEM.LOG</code>).</p>
               </div>
               <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                 <label class="checkbox-row" style="margin:0; font-size:12px;">
@@ -810,6 +810,7 @@
                   <span>Auto-Refresh (1s)</span>
                 </label>
                 <button type="button" id="syslog-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
+                <button type="button" id="syslog-download-btn" class="btn-outline btn-sm">⬇️ Download Log</button>
                 <button type="button" id="syslog-clear-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Clear</button>
               </div>
             </div>

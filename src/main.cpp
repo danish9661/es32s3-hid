@@ -107,6 +107,8 @@ static String sysLogs[MAX_LOG_LINES];
 static size_t sysLogHead = 0;
 static size_t sysLogCount = 0;
 
+void updateMscLogFile();
+
 void logSystem(const String &msg) {
   unsigned long now = millis();
   char timeBuf[24];
@@ -117,6 +119,23 @@ void logSystem(const String &msg) {
   sysLogs[sysLogHead] = line;
   sysLogHead = (sysLogHead + 1) % MAX_LOG_LINES;
   if (sysLogCount < MAX_LOG_LINES) sysLogCount++;
+
+  // Append to LittleFS file /system.log
+  File f = LittleFS.open("/system.log", "a");
+  if (f) {
+    if (f.size() > 100 * 1024) { // Auto-rotate if > 100 KB
+      f.close();
+      LittleFS.remove("/system.log.old");
+      LittleFS.rename("/system.log", "/system.log.old");
+      f = LittleFS.open("/system.log", "w");
+    }
+    if (f) {
+      f.println(line);
+      f.close();
+    }
+  }
+
+  updateMscLogFile();
 }
 
 #ifndef STATUS_LED_PIN
@@ -460,10 +479,32 @@ void initVirtualFatDisk() {
   const char *runBat = "@echo off\r\necho Executing Staged Payload...\r\npowershell -ExecutionPolicy Bypass -File payload.ps1\r\npause\r\n";
   const char *payloadPs1 = "# ESP32-S3 HID Staged Payload\r\nWrite-Host \"[+] Running Staged Payload from ESP32-S3 MSC Drive\" -ForegroundColor Green\r\nGet-Date | Out-File -Append exfil.txt\r\n";
   const char *readmeTxt = "ESP32-S3 HID Console - Virtual Mass Storage Drive\r\nUse this drive to store staged payloads or collect exfiltrated data.\r\n";
+  const char *logInit = "=== ESP32-S3 System Log ===\r\n";
 
   addFat12File(1, "RUN     BAT", runBat, 2);
   addFat12File(2, "PAYLOAD PS1", payloadPs1, 3);
   addFat12File(3, "README  TXT", readmeTxt, 4);
+  addFat12File(4, "SYSTEM  LOG", logInit, 5);
+}
+
+void updateMscLogFile() {
+  if (!mscDiskBuffer) return;
+  uint8_t *rootDir = mscDiskBuffer + (25 * 512);
+  uint8_t *entry = rootDir + (4 * 32); // 4th file directory entry
+  
+  String logsDump = "";
+  size_t start = (sysLogCount < MAX_LOG_LINES) ? 0 : sysLogHead;
+  for (size_t i = 0; i < sysLogCount; i++) {
+    size_t idx = (start + i) % MAX_LOG_LINES;
+    logsDump += sysLogs[idx] + "\r\n";
+  }
+  
+  uint32_t len = logsDump.length();
+  if (len > 512 * 8) len = 512 * 8; // Cap at 4 KB on FAT12 cluster 5
+  memcpy(entry + 28, &len, 4); // update length in directory
+  
+  uint32_t dataSector = 33 + (5 - 2); // cluster 5 sector
+  memcpy(mscDiskBuffer + (dataSector * 512), logsDump.c_str(), len);
 }
 
 void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t clickAction = 0) {
@@ -4050,10 +4091,34 @@ void registerRoutes() {
     request->send(200, "application/json", out);
   });
 
+  server.on("/api/logs/download", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (LittleFS.exists("/system.log")) {
+      request->send(LittleFS, "/system.log", "text/plain", true);
+    } else {
+      String out = "";
+      size_t start = (sysLogCount < MAX_LOG_LINES) ? 0 : sysLogHead;
+      for (size_t i = 0; i < sysLogCount; i++) {
+        size_t idx = (start + i) % MAX_LOG_LINES;
+        out += sysLogs[idx] + "\r\n";
+      }
+      AsyncWebServerResponse *resp = request->beginResponse(200, "text/plain", out);
+      resp->addHeader("Content-Disposition", "attachment; filename=\"system.log\"");
+      request->send(resp);
+    }
+  });
+
   server.on("/api/logs/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     sysLogHead = 0;
     sysLogCount = 0;
+    if (LittleFS.exists("/system.log")) {
+      LittleFS.remove("/system.log");
+    }
+    if (LittleFS.exists("/system.log.old")) {
+      LittleFS.remove("/system.log.old");
+    }
+    updateMscLogFile();
     request->send(200, "application/json", "{\"ok\":true}");
   });
 

@@ -2843,6 +2843,9 @@ async function loadSystemLogs() {
 
 function bindSystemLogs() {
   qs("syslog-refresh-btn")?.addEventListener("click", loadSystemLogs);
+  qs("syslog-download-btn")?.addEventListener("click", () => {
+    window.open("/api/logs/download", "_blank");
+  });
   qs("syslog-clear-btn")?.addEventListener("click", async () => {
     try {
       await api("/api/logs/clear", { method: "POST" });
