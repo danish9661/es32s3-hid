@@ -766,12 +766,14 @@ bool unlockVaultWithPassword(const String &password, uint64_t clientEpoch = 0) {
   f.close();
 
   memcpy(vaultSalt, hdr.salt, VAULT_SALT_LEN);
+  Serial.printf("[VAULT] Unlock: file salt[0]=%02x salt[1]=%02x salt[2]=%02x cipherLen=%u\n", vaultSalt[0], vaultSalt[1], vaultSalt[2], (unsigned)cipherLen);
 
   uint8_t derivedKey[VAULT_KEY_LEN];
   if (!pbkdf2DeriveKey(password, vaultSalt, VAULT_SALT_LEN, derivedKey)) {
     free(cipherBuf);
     return false;
   }
+  Serial.printf("[VAULT] Unlock: derived key[0]=%02x key[1]=%02x\n", derivedKey[0], derivedKey[1]);
 
   uint8_t *plainBuf = static_cast<uint8_t *>(malloc(cipherLen + 1));
   if (!plainBuf) {
@@ -792,9 +794,11 @@ bool unlockVaultWithPassword(const String &password, uint64_t clientEpoch = 0) {
   free(cipherBuf);
 
   if (!ok) {
+    Serial.println("[VAULT] Unlock: AES-GCM auth decrypt FAILED (wrong password or corrupted data)");
     free(plainBuf);
     return false;
   }
+  Serial.println("[VAULT] Unlock: SUCCESS");
 
   plainBuf[cipherLen] = '\0';
   vaultCachedJson = reinterpret_cast<char *>(plainBuf);
@@ -4085,11 +4089,13 @@ void registerRoutes() {
         return;
       }
       esp_fill_random(vaultSalt, sizeof(vaultSalt));
+      Serial.printf("[VAULT] Setup: salt[0]=%02x salt[1]=%02x salt[2]=%02x\n", vaultSalt[0], vaultSalt[1], vaultSalt[2]);
       uint8_t derivedKey[VAULT_KEY_LEN];
       if (!pbkdf2DeriveKey(pass, vaultSalt, sizeof(vaultSalt), derivedKey)) {
         request->send(500, "application/json", "{\"error\":\"Key derivation failed\"}");
         return;
       }
+      Serial.printf("[VAULT] Setup: key[0]=%02x key[1]=%02x\n", derivedKey[0], derivedKey[1]);
       if (!saveVaultEncrypted("[]", derivedKey)) {
         request->send(500, "application/json", "{\"error\":\"Failed to initialize vault file\"}");
         return;
@@ -4098,6 +4104,7 @@ void registerRoutes() {
       vaultUnlocked = true;
       vaultLastActiveMs = millis();
       vaultCachedJson = "[]";
+      Serial.println("[VAULT] Setup complete, vault unlocked");
       request->send(200, "application/json", "{\"ok\":true}");
     }
   );
@@ -4129,14 +4136,18 @@ void registerRoutes() {
   server.on("/api/vault/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     lockVault();
+    memset(vaultSalt, 0, sizeof(vaultSalt));
     if (LittleFS.exists(VAULT_FILE)) {
       LittleFS.remove(VAULT_FILE);
+      Serial.println("[VAULT] Removed vault.enc from LittleFS");
     }
     Preferences prefs;
     if (prefs.begin("vault_nvs", false)) {
       prefs.clear();
       prefs.end();
+      Serial.println("[VAULT] Cleared vault_nvs NVS namespace");
     }
+    Serial.println("[VAULT] Reset complete");
     request->send(200, "application/json", "{\"ok\":true,\"reset\":true}");
   });
 
