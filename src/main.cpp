@@ -4047,8 +4047,7 @@ void registerRoutes() {
             cmd = U_SPIFFS;
           }
         }
-        size_t maxSpace = (cmd == U_SPIFFS) ? 0x900000 : (3 * 1024 * 1024);
-        if (!Update.begin(maxSpace, cmd)) {
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) {
           Update.printError(Serial);
         }
       }
