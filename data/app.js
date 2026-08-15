@@ -2955,6 +2955,7 @@ async function refreshVaultView() {
       lockedCard?.classList.add("hidden");
       unlockedCard?.classList.remove("hidden");
       await loadVaultEntries();
+      await loadFidoStatus();
       startVaultTicker();
     }
   } catch (_) {
@@ -3106,6 +3107,132 @@ function renderVaultEntries() {
         await deleteVaultEntry(id);
       }
     });
+  });
+}
+
+// --- FIDO2 / WEBAUTHN PASSKEYS DASHBOARD ---
+async function loadFidoStatus() {
+  const list = qs("fido-passkeys-list");
+  const touchBadge = qs("fido-touch-badge");
+  if (!list) return;
+  try {
+    const res = await api("/api/fido/status");
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const modeBadge = qs("fido-mode-badge");
+    const toggleBtn = qs("fido-toggle-mode-btn");
+    if (modeBadge) {
+      if (data.security_key_mode) {
+        modeBadge.className = "badge";
+        modeBadge.style.background = "#00f3ff";
+        modeBadge.style.color = "#070b14";
+        modeBadge.textContent = "🛡️ Dedicated Passkey Mode";
+      } else {
+        modeBadge.className = "badge ok";
+        modeBadge.textContent = "💻 Normal Ducky Mode";
+      }
+    }
+    if (toggleBtn) {
+      toggleBtn.textContent = data.security_key_mode ? "💻 Switch to Normal Ducky Mode" : "🛡️ Switch to Passkey Mode";
+    }
+
+    if (touchBadge) {
+      touchBadge.classList.toggle("hidden", !data.waiting_for_touch);
+      if (data.waiting_for_touch) {
+        touchBadge.textContent = data.pending_rp ? `⚠️ Touch BOOT for ${data.pending_rp}` : "⚠️ Touch BOOT Button";
+      }
+    }
+
+    list.innerHTML = "";
+    if (!data.credentials || data.credentials.length === 0) {
+      list.innerHTML = '<div class="small" style="padding:10px; color:var(--muted); text-align:center;">No hardware passkeys registered yet. Click <strong>Test Passkey</strong> or register on any website (e.g. webauthn.io, GitHub, Google).</div>';
+      return;
+    }
+
+    data.credentials.forEach((c) => {
+      const item = document.createElement("div");
+      item.className = "file-item";
+      item.style.cursor = "default";
+      item.innerHTML = `
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span>🔑</span>
+          <div>
+            <strong>${escapeHtml(c.rpId)}</strong>
+            <div class="small" style="color:var(--muted); font-size:11px;">User: ${escapeHtml(c.userName || "N/A")} • Counter: ${c.signCounter}</div>
+          </div>
+        </div>
+        <span class="badge ok" style="font-size:10px;">Hardware Resident</span>
+      `;
+      list.appendChild(item);
+    });
+  } catch (_) {}
+}
+
+function bindFidoControls() {
+  qs("fido-toggle-mode-btn")?.addEventListener("click", async () => {
+    try {
+      setText("fido-status-msg", "Switching USB profile & rebooting device...");
+      await api("/api/fido/mode", { method: "POST", body: "{}" });
+      setTimeout(() => {
+        window.location.reload();
+      }, 2500);
+    } catch (_) {
+      setText("fido-status-msg", "Failed to switch USB mode.");
+    }
+  });
+
+  qs("fido-refresh-btn")?.addEventListener("click", loadFidoStatus);
+  qs("fido-reset-btn")?.addEventListener("click", async () => {
+    if (!confirm("Are you sure you want to reset and delete all registered FIDO2 / WebAuthn passkeys?")) return;
+    try {
+      await api("/api/fido/reset", { method: "POST" });
+      setText("fido-status-msg", "All hardware passkeys cleared.");
+      await loadFidoStatus();
+    } catch (_) {
+      setText("fido-status-msg", "Failed to reset passkeys.");
+    }
+  });
+
+  qs("fido-test-register-btn")?.addEventListener("click", async () => {
+    if (!window.PublicKeyCredential || !window.isSecureContext) {
+      setText("fido-status-msg", "WebAuthn requires HTTPS for security isolation. Opening https://webauthn.io in a new tab to test your security key...");
+      window.open("https://webauthn.io", "_blank");
+      return;
+    }
+    try {
+      setText("fido-status-msg", "Press physical BOOT button on ESP32 to authorize passkey creation...");
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      const userId = new Uint8Array(16);
+      window.crypto.getRandomValues(userId);
+
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: challenge,
+          rp: { name: "ESP32-S3 Security Key Test", id: window.location.hostname },
+          user: {
+            id: userId,
+            name: "admin@esp32.local",
+            displayName: "ESP32 Operator"
+          },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: {
+            authenticatorAttachment: "cross-platform",
+            userVerification: "discouraged"
+          },
+          timeout: 30000
+        }
+      });
+      if (credential) {
+        setText("fido-status-msg", "✅ Passkey created successfully on ESP32-S3 hardware!");
+        await loadFidoStatus();
+      }
+    } catch (err) {
+      console.error("WebAuthn test error", err);
+      setText("fido-status-msg", "Test result: " + (err.message || "Completed"));
+      await loadFidoStatus();
+    }
   });
 }
 
@@ -3606,6 +3733,7 @@ async function bootstrap() {
   bindAbsoluteMouse();
   bindOtaControls();
   bindSystemLogs();
+  bindFidoControls();
   bindKeyboardPreferenceControls();
   startMouseFlushLoop();
 

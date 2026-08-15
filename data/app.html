@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ESP32-S3 HID Console</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2300f3ff'><path d='M20 5H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 5H5v-2h2v2zm0-3H5v-2h2v2zm0-3H5V8h2v2zm9 8H8v-2h8v2zm0-3h-2v-2h2v2zm0-3h-2V8h2v2zm3 6h-2v-2h2v2zm0-3h-2v-2h2v2zm0-3h-2V8h2v2z'/></svg>">
-  <link rel="stylesheet" href="/styles.css?v=2.4.0">
+  <link rel="stylesheet" href="/styles.css?v=2.5.0">
 </head>
 <body>
   <div class="layout">
@@ -170,6 +170,30 @@
               <p>No items in your vault yet. Click <strong>+ Add Item</strong> to add your first 2FA authenticator or password.</p>
             </div>
             <div id="vault-action-status" class="status-line"></div>
+
+            <!-- FIDO2 Hardware Passkeys Section -->
+            <div class="network-info-card" style="margin-top:24px;">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span>🛡️ Hardware Passkeys (FIDO2 / WebAuthn CTAP2)</span>
+                    <span id="fido-mode-badge" class="badge ok">Normal Ducky Mode</span>
+                    <span id="fido-touch-badge" class="badge hidden" style="background:#00f3ff; color:#070b14; font-weight:700;">⚠️ Touch BOOT Button</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Dedicated security key profile for Chrome, Google, GitHub, Apple & Microsoft. 💡 <em>Hold physical BOOT button 2.5s on board to toggle mode anytime.</em></p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <button type="button" id="fido-toggle-mode-btn" class="btn-primary btn-sm">🛡️ Switch to Passkey Mode</button>
+                  <button type="button" id="fido-test-register-btn" class="btn-outline btn-sm">🔑 Test Passkey</button>
+                  <button type="button" id="fido-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
+                  <button type="button" id="fido-reset-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Reset Passkeys</button>
+                </div>
+              </div>
+              <div id="fido-passkeys-list" class="files-list" style="margin-top:12px; max-height:180px; overflow-y:auto;">
+                <!-- Registered Passkeys -->
+              </div>
+              <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
+            </div>
           </div>
 
           <!-- Add / Edit Modal -->
@@ -838,6 +862,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=2.4.0"></script>
+  <script src="/app.js?v=2.5.0"></script>
 </body>
 </html>

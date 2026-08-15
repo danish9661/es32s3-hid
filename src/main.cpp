@@ -14,6 +14,7 @@
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
 #include "USBHIDConsumerControl.h"
+#include "USBHIDFIDO.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_random.h"
@@ -101,7 +102,7 @@
 #define KEY_F12 205
 #endif
 
-#define FIRMWARE_VERSION "2.4.0"
+#define FIRMWARE_VERSION "2.5.0"
 #define BUILD_DATE       __DATE__ " " __TIME__
 
 static constexpr size_t MAX_LOG_LINES = 120;
@@ -231,18 +232,25 @@ int kvmMouseSmoothness = 100;
 
 bool usbMscEnabled = true;
 String usbMscVolumeLabel = "DUCKY_DRIVE";
+bool fidoSecurityKeyMode = false;
 
 constexpr size_t MSC_SECTOR_SIZE = 512;
 constexpr size_t MSC_SECTOR_COUNT = 4096; // 2 MB
 constexpr size_t MSC_DISK_SIZE = MSC_SECTOR_COUNT * MSC_SECTOR_SIZE;
 
 // --- RUNTIME OBJECTS ---
-USBHIDKeyboard Keyboard;
-USBHIDMouse Mouse;
-USBHIDConsumerControl Consumer;
+// IMPORTANT: FIDO must be declared FIRST so its HID descriptor registers before
+// Keyboard/Mouse/Consumer. Chrome's parse_report_descriptor() reads only the FIRST
+// USAGE_PAGE from the combined HID descriptor; if Keyboard (0x01) comes first,
+// Chrome rejects the device as "Not a FIDO device".
+USBHIDFIDO FIDO;
+USBHIDKeyboard* Keyboard = nullptr;
+USBHIDMouse* Mouse = nullptr;
+USBHIDConsumerControl* Consumer = nullptr;
 USBMSC MSC;
 AsyncWebServer server(80);
-Adafruit_NeoPixel pixels(NUMPIXELS, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pixels(NUMPIXELS, 48, NEO_RGB + NEO_KHZ800);
+Adafruit_NeoPixel pixels_alt(NUMPIXELS, 38, NEO_RGB + NEO_KHZ800);
 WiFiUDP kvmUdp;
 
 char *psramBuffer = nullptr;
@@ -514,7 +522,7 @@ void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t 
   yPct = clampInt(static_cast<int>(yPct * 10.0f), 0, 1000) / 10.0f;
 
   for (int i = 0; i < 20; i++) {
-    Mouse.move(-127, -127, 0, 0);
+    if(Mouse) Mouse->move(-127, -127, 0, 0);
     delay(1);
   }
   delay(10);
@@ -525,7 +533,7 @@ void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t 
   while (targetX > 0 || targetY > 0) {
     int8_t stepX = static_cast<int8_t>(clampInt(targetX, 0, 120));
     int8_t stepY = static_cast<int8_t>(clampInt(targetY, 0, 120));
-    Mouse.move(stepX, stepY, 0, 0);
+    if(Mouse) Mouse->move(stepX, stepY, 0, 0);
     targetX -= stepX;
     targetY -= stepY;
     if (targetX > 0 || targetY > 0) delay(1);
@@ -534,11 +542,11 @@ void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t 
   if (clickButton != 0) {
     delay(15);
     if (clickAction == MOUSE_ACTION_DOWN) {
-      Mouse.press(clickButton);
+      if(Mouse) Mouse->press(clickButton);
     } else if (clickAction == MOUSE_ACTION_UP) {
-      Mouse.release(clickButton);
+      if(Mouse) Mouse->release(clickButton);
     } else {
-      Mouse.click(clickButton);
+      if(Mouse) Mouse->click(clickButton);
     }
   }
 }
@@ -1030,6 +1038,8 @@ bool parseUint16JsonValue(const JsonVariantConst &variant, uint16_t &out) {
 void setStatus(uint8_t r, uint8_t g, uint8_t b) {
   pixels.setPixelColor(0, pixels.Color(r, g, b));
   pixels.show();
+  pixels_alt.setPixelColor(0, pixels_alt.Color(r, g, b));
+  pixels_alt.show();
 }
 
 bool isPrivateIPv4(const IPAddress &ip) {
@@ -1433,6 +1443,7 @@ void persistSettings() {
   out["usb_product_name"] = usbProductName;
   out["usb_msc_enabled"] = usbMscEnabled;
   out["usb_msc_label"] = usbMscVolumeLabel;
+  out["fido_mode"] = fidoSecurityKeyMode;
 
   out["delay"] = typeDelay;
   out["burst_chars"] = burstChars;
@@ -1468,6 +1479,7 @@ void persistSettings() {
     prefs.putString("usb_pn", usbProductName);
     prefs.putBool("usb_msc", usbMscEnabled);
     prefs.putString("usb_lbl", usbMscVolumeLabel);
+    prefs.putBool("fido_mode", fidoSecurityKeyMode);
     prefs.putInt("delay", typeDelay);
     prefs.putInt("burst_c", burstChars);
     prefs.putInt("burst_p", burstPauseMs);
@@ -1504,6 +1516,7 @@ bool loadSettingsNVS() {
   usbProductName = prefs.getString("usb_pn", usbProductName);
   usbMscEnabled = prefs.getBool("usb_msc", usbMscEnabled);
   usbMscVolumeLabel = prefs.getString("usb_lbl", usbMscVolumeLabel);
+  fidoSecurityKeyMode = prefs.getBool("fido_mode", fidoSecurityKeyMode);
   typeDelay = prefs.getInt("delay", typeDelay);
   burstChars = prefs.getInt("burst_c", burstChars);
   burstPauseMs = prefs.getInt("burst_p", burstPauseMs);
@@ -1552,6 +1565,15 @@ void loadSettings() {
         if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
         if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
         if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
+        if (doc.containsKey("fido_mode")) {
+          fidoSecurityKeyMode = doc["fido_mode"].as<bool>();
+        } else {
+          Preferences prefs;
+          if (prefs.begin("sysconfig", true)) {
+            fidoSecurityKeyMode = prefs.getBool("fido_mode", fidoSecurityKeyMode);
+            prefs.end();
+          }
+        }
 
         usbVendorName.trim();
         usbProductName.trim();
@@ -1714,20 +1736,20 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &w
 }
 
 void keyboardTap(uint8_t keyCode, uint16_t holdMs = 35) {
-  Keyboard.press(keyCode);
+  if(Keyboard) Keyboard->press(keyCode);
   delay(holdMs);
-  Keyboard.releaseAll();
+  if(Keyboard) Keyboard->releaseAll();
 }
 
 void keyboardCombo(bool ctrl, bool alt, bool shift, bool gui, uint8_t keyCode, uint16_t holdMs = 40) {
-  if (ctrl) Keyboard.press(KEY_LEFT_CTRL);
-  if (alt) Keyboard.press(KEY_LEFT_ALT);
-  if (shift) Keyboard.press(KEY_LEFT_SHIFT);
-  if (gui) Keyboard.press(KEY_LEFT_GUI);
+  if (ctrl) if(Keyboard) Keyboard->press(KEY_LEFT_CTRL);
+  if (alt) if(Keyboard) Keyboard->press(KEY_LEFT_ALT);
+  if (shift) if(Keyboard) Keyboard->press(KEY_LEFT_SHIFT);
+  if (gui) if(Keyboard) Keyboard->press(KEY_LEFT_GUI);
 
-  Keyboard.press(keyCode);
+  if(Keyboard) Keyboard->press(keyCode);
   delay(holdMs);
-  Keyboard.releaseAll();
+  if(Keyboard) Keyboard->releaseAll();
 }
 
 bool queueHidEvent(const HidRealtimeEvent &event, TickType_t timeoutTicks = 0) {
@@ -1765,40 +1787,40 @@ void hidRealtimeTask(void *parameter) {
         keyboardTap(event.keyCode, event.holdMs);
         break;
       case HidRealtimeType::KeyDown:
-        Keyboard.press(event.keyCode);
+        if(Keyboard) Keyboard->press(event.keyCode);
         break;
       case HidRealtimeType::KeyUp:
-        Keyboard.release(event.keyCode);
+        if(Keyboard) Keyboard->release(event.keyCode);
         break;
       case HidRealtimeType::KeyReleaseAll:
-        Keyboard.releaseAll();
-        Mouse.release(MOUSE_ALL);
-        Consumer.release();
+        if(Keyboard) Keyboard->releaseAll();
+        if(Mouse) Mouse->release(MOUSE_ALL);
+        if(Consumer) Consumer->release();
         kvmButtons = 0;
         break;
       case HidRealtimeType::Combo:
         keyboardCombo(event.ctrl, event.alt, event.shift, event.gui, event.keyCode, event.holdMs);
         break;
       case HidRealtimeType::MouseMove:
-        Mouse.move(event.dx, event.dy, 0, 0);
+        if(Mouse) Mouse->move(event.dx, event.dy, 0, 0);
         break;
       case HidRealtimeType::MouseScroll:
-        Mouse.move(0, 0, event.wheel, event.pan);
+        if(Mouse) Mouse->move(0, 0, event.wheel, event.pan);
         break;
       case HidRealtimeType::MouseButton:
         if (event.mouseAction == MOUSE_ACTION_DOWN) {
-          Mouse.press(event.mouseButton);
+          if(Mouse) Mouse->press(event.mouseButton);
         } else if (event.mouseAction == MOUSE_ACTION_UP) {
-          Mouse.release(event.mouseButton);
+          if(Mouse) Mouse->release(event.mouseButton);
         } else {
-          Mouse.click(event.mouseButton);
+          if(Mouse) Mouse->click(event.mouseButton);
         }
         break;
       case HidRealtimeType::KvmKeyboardState: {
         KeyReport report = {};
         report.modifiers = event.kvmModifiers;
         memcpy(report.keys, event.kvmKeys, sizeof(report.keys));
-        Keyboard.sendReport(&report);
+        if(Keyboard) Keyboard->sendReport(&report);
       } break;
       case HidRealtimeType::KvmMouseState: {
         uint8_t changed = kvmButtons ^ event.kvmButtons;
@@ -1806,8 +1828,8 @@ void hidRealtimeTask(void *parameter) {
           uint8_t pressedMask = changed & event.kvmButtons;
           uint8_t releasedMask = changed & static_cast<uint8_t>(~event.kvmButtons);
 
-          if (pressedMask) Mouse.press(pressedMask);
-          if (releasedMask) Mouse.release(releasedMask);
+          if (pressedMask) if(Mouse) Mouse->press(pressedMask);
+          if (releasedMask) if(Mouse) Mouse->release(releasedMask);
 
           kvmButtons = event.kvmButtons;
         }
@@ -1819,7 +1841,7 @@ void hidRealtimeTask(void *parameter) {
         while (dx != 0 || dy != 0) {
           int8_t stepX = clampInt8(dx, -120, 120);
           int8_t stepY = clampInt8(dy, -120, 120);
-          Mouse.move(stepX, stepY, 0, 0);
+          if(Mouse) Mouse->move(stepX, stepY, 0, 0);
 
           dx -= stepX;
           dy -= stepY;
@@ -1830,15 +1852,15 @@ void hidRealtimeTask(void *parameter) {
         }
 
         if (event.kvmWheel != 0 || event.kvmPan != 0) {
-          Mouse.move(0, 0, event.kvmWheel, event.kvmPan);
+          if(Mouse) Mouse->move(0, 0, event.kvmWheel, event.kvmPan);
         }
       } break;
       case HidRealtimeType::ConsumerControl:
         if (event.consumerUsage == 0) {
-          Consumer.release();
+          if(Consumer) Consumer->release();
         } else {
-          Consumer.press(event.consumerUsage);
-          Consumer.release();
+          if(Consumer) Consumer->press(event.consumerUsage);
+          if(Consumer) Consumer->release();
         }
         break;
       default:
@@ -1868,7 +1890,7 @@ void typeTextInternal(size_t startIndex, size_t length) {
     }
 
     char c = psramBuffer[startIndex + i];
-    Keyboard.write(static_cast<uint8_t>(c));
+    if(Keyboard) Keyboard->write(static_cast<uint8_t>(c));
 
     // FIX: vTaskDelay yields to RTOS scheduler; stopScriptFlag is checked
     // immediately after each char rather than blocking Core 1 hard.
@@ -2020,7 +2042,7 @@ bool executeDuckyCommandLineFast(const char *line, size_t len, int defaultDelay)
     int sincePause = 0;
     for (size_t c = 0; c < payloadLen; c++) {
       if (stopScriptFlag) break;
-      Keyboard.write(static_cast<uint8_t>(payload[c]));
+      if(Keyboard) Keyboard->write(static_cast<uint8_t>(payload[c]));
       if (charDelay > 0) vTaskDelay(pdMS_TO_TICKS(charDelay));
       if (++sincePause >= batchSize) {
         sincePause = 0;
@@ -2038,7 +2060,7 @@ bool executeDuckyCommandLineFast(const char *line, size_t len, int defaultDelay)
     int sincePause = 0;
     for (size_t c = 0; c < payloadLen; c++) {
       if (stopScriptFlag) break;
-      Keyboard.write(static_cast<uint8_t>(payload[c]));
+      if(Keyboard) Keyboard->write(static_cast<uint8_t>(payload[c]));
       if (charDelay > 0) vTaskDelay(pdMS_TO_TICKS(charDelay));
       if (++sincePause >= batchSize) {
         sincePause = 0;
@@ -2382,7 +2404,7 @@ void replayMouseDelta(int dx, int dy) {
   while (!stopScriptFlag && (remX != 0 || remY != 0)) {
     int8_t stepX = clampInt8(remX, -120, 120);
     int8_t stepY = clampInt8(remY, -120, 120);
-    Mouse.move(stepX, stepY, 0, 0);
+    if(Mouse) Mouse->move(stepX, stepY, 0, 0);
     remX -= stepX;
     remY -= stepY;
 
@@ -2422,12 +2444,12 @@ bool runActionFile(const String &safeName) {
       keyboardTap(code, hold);
     } else if (event == "key_down" && count >= 3) {
       uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
-      Keyboard.press(code);
+      if(Keyboard) Keyboard->press(code);
     } else if (event == "key_up" && count >= 3) {
       uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
-      Keyboard.release(code);
+      if(Keyboard) Keyboard->release(code);
     } else if (event == "key_release_all") {
-      Keyboard.releaseAll();
+      if(Keyboard) Keyboard->releaseAll();
     } else if (event == "combo" && count >= 5) {
       int flags = clampInt(parts[2].toInt(), 0, 15);
       uint8_t code = static_cast<uint8_t>(clampInt(parts[3].toInt(), 0, 255));
@@ -2441,32 +2463,32 @@ bool runActionFile(const String &safeName) {
     } else if (event == "mouse_scroll" && count >= 4) {
       int wheel = clampInt(parts[2].toInt(), -127, 127);
       int pan = clampInt(parts[3].toInt(), -127, 127);
-      Mouse.move(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
+      if(Mouse) Mouse->move(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
     } else if (event == "mouse_button" && count >= 4) {
       uint8_t button = parseActionMouseButtonToken(parts[2]);
       uint8_t action = parseActionMouseActionToken(parts[3]);
       if (action == MOUSE_ACTION_DOWN) {
-        Mouse.press(button);
+        if(Mouse) Mouse->press(button);
       } else if (action == MOUSE_ACTION_UP) {
-        Mouse.release(button);
+        if(Mouse) Mouse->release(button);
       } else {
-        Mouse.click(button);
+        if(Mouse) Mouse->click(button);
       }
     } else if (event == "consumer" && count >= 3) {
       uint16_t usage = static_cast<uint16_t>(clampInt(parts[2].toInt(), 0, 0xFFFF));
       if (usage == 0) {
-        Consumer.release();
+        if(Consumer) Consumer->release();
       } else {
-        Consumer.press(usage);
-        Consumer.release();
+        if(Consumer) Consumer->press(usage);
+        if(Consumer) Consumer->release();
       }
     }
   }
 
   file.close();
-  Keyboard.releaseAll();
-  Mouse.release(MOUSE_ALL);
-  Consumer.release();
+  if(Keyboard) Keyboard->releaseAll();
+  if(Mouse) Mouse->release(MOUSE_ALL);
+  if(Consumer) Consumer->release();
   return true;
 }
 
@@ -2492,9 +2514,9 @@ void duckyWorkerTask(void *parameter) {
         parseAndExecuteInternal(job.length);
       }
 
-      Keyboard.releaseAll();
-      Mouse.release(MOUSE_ALL);
-      Consumer.release();
+      if(Keyboard) Keyboard->releaseAll();
+      if(Mouse) Mouse->release(MOUSE_ALL);
+      if(Consumer) Consumer->release();
       setStatus(255, 255, 255); // White
       vTaskDelay(pdMS_TO_TICKS(120));
       setStatus(0, 255, 0); // Green
@@ -2721,6 +2743,7 @@ String jsonStatus() {
 void connectWiFi() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
+  WiFi.setHostname("esp32-hid");
 
   bool staConnected = false;
   if (!sta_ssid.isEmpty()) {
@@ -2728,31 +2751,32 @@ void connectWiFi() {
     WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
 
     uint32_t start = millis();
-    while (millis() - start < 10000) {
-      if (WiFi.status() == WL_CONNECTED) {
+    while (millis() - start < 15000) {
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         staConnected = true;
         break;
       }
-      delay(300);
+      delay(200);
     }
   }
 
   if (staConnected) {
-    WiFi.softAP(ap_ssid.c_str(), ap_pass.c_str());
+    int channel = WiFi.channel();
+    if (channel < 1 || channel > 13) channel = 1;
+    WiFi.softAP(ap_ssid.c_str(), ap_pass.c_str(), channel);
+    Serial.printf("[WIFI] Connected to Router! STA IP: %s (Channel: %d)\n", WiFi.localIP().toString().c_str(), channel);
   } else {
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(ap_ssid.c_str(), ap_pass.c_str());
+    WiFi.softAP(ap_ssid.c_str(), ap_pass.c_str(), 1);
+    Serial.println("[WIFI] Running in AP Only mode.");
   }
 
-  Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-  if (staConnected) {
-    Serial.printf("STA IP: %s\n", WiFi.localIP().toString().c_str());
-  }
+  Serial.printf("[WIFI] SoftAP IP: %s\n", WiFi.softAPIP().toString().c_str());
 
   if (MDNS.begin("esp32-hid")) {
     MDNS.addService("http", "tcp", 80);
     MDNS.addServiceTxt("http", "tcp", "path", "/");
-    Serial.println("mDNS responder started: http://esp32-hid.local");
+    Serial.println("[MDNS] Started: http://esp32-hid.local");
   }
 }
 
@@ -2982,12 +3006,6 @@ void registerRoutes() {
         if (user != admin_user || pass != admin_pass) {
           recordLoginFailure(remoteIp);
           request->send(401, "application/json", "{\"error\":\"invalid-credentials\"}");
-          return;
-        }
-
-        bool hasActiveSession = !activeSessionToken.isEmpty() && !isSessionExpired();
-        if (hasActiveSession && remoteIp != activeSessionIp) {
-          request->send(409, "application/json", "{\"error\":\"another-user-active\"}");
           return;
         }
 
@@ -4516,7 +4534,7 @@ void registerRoutes() {
         int digits = target["digits"] | 6;
         String otp = calculateTotp(target["secret"].as<String>(), nowSec, period, digits);
         for (size_t c = 0; c < otp.length(); c++) {
-          Keyboard.write(static_cast<uint8_t>(otp[c]));
+          if(Keyboard) Keyboard->write(static_cast<uint8_t>(otp[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
         if (doc["enter"] | true) {
@@ -4526,13 +4544,13 @@ void registerRoutes() {
       } else if (action == "user" && target.containsKey("user")) {
         String u = target["user"].as<String>();
         for (size_t c = 0; c < u.length(); c++) {
-          Keyboard.write(static_cast<uint8_t>(u[c]));
+          if(Keyboard) Keyboard->write(static_cast<uint8_t>(u[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
       } else if (action == "pass" && target.containsKey("pass")) {
         String p = target["pass"].as<String>();
         for (size_t c = 0; c < p.length(); c++) {
-          Keyboard.write(static_cast<uint8_t>(p[c]));
+          if(Keyboard) Keyboard->write(static_cast<uint8_t>(p[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
         if (doc["enter"] | false) {
@@ -4542,7 +4560,7 @@ void registerRoutes() {
       } else if (action == "both" && target.containsKey("user") && target.containsKey("pass")) {
         String u = target["user"].as<String>();
         for (size_t c = 0; c < u.length(); c++) {
-          Keyboard.write(static_cast<uint8_t>(u[c]));
+          if(Keyboard) Keyboard->write(static_cast<uint8_t>(u[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
         delay(20);
@@ -4550,7 +4568,7 @@ void registerRoutes() {
         delay(20);
         String p = target["pass"].as<String>();
         for (size_t c = 0; c < p.length(); c++) {
-          Keyboard.write(static_cast<uint8_t>(p[c]));
+          if(Keyboard) Keyboard->write(static_cast<uint8_t>(p[c]));
           if (typeDelay > 0) delay(typeDelay);
         }
         if (doc["enter"] | true) {
@@ -4562,80 +4580,145 @@ void registerRoutes() {
       request->send(200, "application/json", "{\"ok\":true}");
     }
   );
+
+  // --- FIDO2 / WEBAUTHN PASSKEY ROUTES ---
+  server.on("/api/fido/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    DynamicJsonDocument doc(16384);
+    JsonArray arr = doc.createNestedArray("credentials");
+    for (const auto &c : FidoStore::getAllCredentials()) {
+      JsonObject obj = arr.createNestedObject();
+      obj["rpId"] = c.rpId;
+      obj["userName"] = c.userName;
+      obj["userDisplayName"] = c.userDisplayName;
+      obj["signCounter"] = c.signCounter;
+      obj["createdAt"] = c.createdAt;
+      String idHex = "";
+      for (uint8_t b : c.credId) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", b);
+        idHex += buf;
+      }
+      obj["credId"] = idHex;
+    }
+    doc["waiting_for_touch"] = FIDO.isWaitingForTouch();
+    doc["pending_rp"] = FIDO.getPendingRpId();
+    doc["security_key_mode"] = fidoSecurityKeyMode;
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on("/api/fido/mode", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      DynamicJsonDocument doc(256);
+      deserializeJson(doc, data, len);
+      fidoSecurityKeyMode = doc["enabled"] | !fidoSecurityKeyMode;
+      Preferences prefs;
+      if (prefs.begin("sysconfig", false)) {
+        prefs.putBool("fido_mode", fidoSecurityKeyMode);
+        prefs.end();
+      }
+      request->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+      delay(300);
+      ESP.restart();
+    }
+  );
+
+  server.on("/api/fido/touch", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (FIDO.isWaitingForTouch()) {
+      FIDO.confirmTouch();
+      request->send(200, "application/json", "{\"ok\":true,\"touched\":true}");
+    } else {
+      request->send(400, "application/json", "{\"error\":\"No pending FIDO request\"}");
+    }
+  });
+
+  server.on("/api/fido/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    FidoStore::clearAll();
+    logSystem("[FIDO2] All Passkeys and Authenticator credentials reset");
+    request->send(200, "application/json", "{\"ok\":true,\"reset\":true}");
+  });
 }
 
 void setup() {
   Serial.begin(115200);
 
-  // BOOT button (GPIO 0) used by WAIT_BUTTON Ducky command
+  // BOOT button (GPIO 0) used by WAIT_BUTTON Ducky command & FIDO2 User Presence Touch
   pinMode(0, INPUT_PULLUP);
 
   pixels.begin();
   pixels.setBrightness(clampInt(ledBrightness, 0, 255));
+  pixels_alt.begin();
+  pixels_alt.setBrightness(clampInt(ledBrightness, 0, 255));
   setStatus(0, 0, 255);
 
   if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS mount failed");
-    setStatus(255, 0, 0);
-    while (true) delay(1000);
+    Serial.println("LittleFS mount failed, retrying...");
+    delay(300);
+    LittleFS.begin(true);
   }
 
-  if (!ensureScriptDir()) {
-    Serial.println("Failed to create /scripts directory");
-  }
-  if (!ensureActionsDir()) {
-    Serial.println("Failed to create /actions directory");
-  }
-
+  ensureScriptDir();
+  ensureActionsDir();
   loadSettings();
 
-  psramBuffer = static_cast<char *>(heap_caps_malloc(BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+  if (psramFound()) {
+    psramBuffer = static_cast<char *>(heap_caps_malloc(BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+  }
   if (!psramBuffer) {
-    Serial.println("PSRAM allocation failed");
-    setStatus(255, 0, 0);
-    while (true) delay(1000);
+    psramBuffer = static_cast<char *>(malloc(64 * 1024));
   }
 
-  mscDiskBuffer = static_cast<uint8_t *>(heap_caps_malloc(MSC_DISK_SIZE, MALLOC_CAP_SPIRAM));
-  if (mscDiskBuffer) {
-    initVirtualFatDisk();
-    if (usbMscEnabled) {
-      MSC.vendorID(usbVendorName.c_str());
-      MSC.productID(usbMscVolumeLabel.c_str());
-      MSC.productRevision("1.0");
-      MSC.onRead(onMscRead);
-      MSC.onWrite(onMscWrite);
-      MSC.onStartStop(onMscStartStop);
-      MSC.mediaPresent(true);
-      MSC.begin(MSC_SECTOR_COUNT, MSC_SECTOR_SIZE);
+  if (fidoSecurityKeyMode) {
+    // Dedicated FIDO2 Hardware Security Key Profile
+    FIDO.begin(true);
+    USB.VID(0x10C4);
+    USB.PID(0x8A2A);
+    USB.manufacturerName("FIDO Alliance");
+    USB.productName("ESP32-S3 FIDO2 Passkey");
+    USB.begin();
+    setStatus(0, 180, 255); // Solid Cyan LED in Passkey Mode!
+  } else {
+    // Normal Ducky Keyboard + Mouse + MSC Profile
+    // Allocate here so their constructors (addDevice) only run in normal mode.
+    // In passkey mode they must NOT exist — FIDO must be the only HID device.
+    Keyboard = new USBHIDKeyboard();
+    Mouse    = new USBHIDMouse();
+    Consumer = new USBHIDConsumerControl();
+    if(Keyboard) Keyboard->begin();
+    if(Mouse) Mouse->begin();
+    if(Consumer) Consumer->begin();
+    FIDO.begin(false);
+    if (psramFound()) {
+      mscDiskBuffer = static_cast<uint8_t *>(heap_caps_malloc(MSC_DISK_SIZE, MALLOC_CAP_SPIRAM));
+      if (mscDiskBuffer && usbMscEnabled) {
+        initVirtualFatDisk();
+        MSC.vendorID(usbVendorName.c_str());
+        MSC.productID(usbMscVolumeLabel.c_str());
+        MSC.productRevision("1.0");
+        MSC.onRead(onMscRead);
+        MSC.onWrite(onMscWrite);
+        MSC.onStartStop(onMscStartStop);
+        MSC.mediaPresent(true);
+        MSC.begin(MSC_SECTOR_COUNT, MSC_SECTOR_SIZE);
+      }
     }
+    USB.VID(usbVendorId);
+    USB.PID(usbProductId);
+    USB.manufacturerName(usbVendorName.c_str());
+    USB.productName(usbProductName.c_str());
+    USB.begin();
+    setStatus(0, 255, 0); // Solid Green LED in Normal Mode!
   }
-
-  USB.VID(usbVendorId);
-  USB.PID(usbProductId);
-  USB.manufacturerName(usbVendorName.c_str());
-  USB.productName(usbProductName.c_str());
-
-  USB.begin();
-  Keyboard.begin();
-  Mouse.begin();
-  Consumer.begin();
 
   jobQueue = xQueueCreate(1, sizeof(DuckyJob));
   hidEventQueue = xQueueCreate(64, sizeof(HidRealtimeEvent));
-  if (!jobQueue || !hidEventQueue) {
-    Serial.println("Queue creation failed");
-    setStatus(255, 0, 0);
-    while (true) delay(1000);
-  }
-
   kvmUdpMutex = xSemaphoreCreateMutex();
   kvmBridgeRecordMutex = xSemaphoreCreateMutex();
-  if (!kvmUdpMutex || !kvmBridgeRecordMutex) {
-    Serial.println("Mutex creation failed");
-    setStatus(255, 0, 0);
-    while (true) delay(1000);
-  }
 
   xTaskCreatePinnedToCore(duckyWorkerTask, "DuckyWorker", 16384, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(hidRealtimeTask, "HidRealtime", 8192, nullptr, 2, nullptr, 0);
@@ -4646,42 +4729,90 @@ void setup() {
   registerRoutes();
   server.begin();
 
-  setStatus(0, 255, 0);
   logSystem("[BOOT] ESP32-S3 HID Console initialized (FW: v" + String(FIRMWARE_VERSION) + ")");
   logSystem("[NET] Web Server running. AP IP: " + WiFi.softAPIP().toString() + (WiFi.status() == WL_CONNECTED ? " | STA IP: " + WiFi.localIP().toString() : ""));
-  logSystem("[USB] HID Keyboard, Mouse & Consumer Control ready");
+  if (fidoSecurityKeyMode) {
+    logSystem("[USB] Dedicated FIDO2 Hardware Passkey active (Cyan LED)");
+  } else {
+    logSystem("[USB] Normal Ducky HID + MSC Storage active (Green LED)");
+  }
 }
 
 void checkPhysical2faTrigger() {
-  static uint32_t lastBtnPress = 0;
-  // BOOT button is GPIO 0 (active LOW)
+  static uint32_t btnPressStart = 0;
+  static uint32_t lastPulse = 0;
+  static bool pulseState = false;
+
+  // 1. FIDO2 / WebAuthn User Presence Touch Prompt
+  if (FIDO.isWaitingForTouch()) {
+    FIDO.checkTimeout();
+    // High-visibility rapid blinking Cyan LED while waiting for user touch
+    if (millis() - lastPulse > 180) {
+      lastPulse = millis();
+      pulseState = !pulseState;
+      if (pulseState) {
+        setStatus(0, 255, 255); // Full Brightness Cyan
+      } else {
+        setStatus(0, 0, 0);     // OFF
+      }
+    }
+  }
+
+  // Physical BOOT Button Handler (GPIO 0, active LOW)
   if (digitalRead(0) == LOW) {
-    if (millis() - lastBtnPress > 1500) {
-      lastBtnPress = millis();
-      // If vault is unlocked, find the first TOTP entry and auto-type it over USB HID
-      if (vaultUnlocked) {
-        DynamicJsonDocument itemsDoc(8192);
-        if (deserializeJson(itemsDoc, vaultCachedJson) == DeserializationError::Ok && itemsDoc.is<JsonArray>()) {
-          JsonArray arr = itemsDoc.as<JsonArray>();
-          for (JsonObject obj : arr) {
-            String type = obj["type"] | "totp";
-            if (type == "totp" && obj.containsKey("secret")) {
-              time_t nowSec = time(nullptr);
-              int period = obj["period"] | 30;
-              int digits = obj["digits"] | 6;
-              String otp = calculateTotp(obj["secret"].as<String>(), nowSec, period, digits);
-              for (size_t c = 0; c < otp.length(); c++) {
-                Keyboard.write(static_cast<uint8_t>(otp[c]));
-                if (typeDelay > 0) delay(typeDelay);
+    if (btnPressStart == 0) {
+      btnPressStart = millis();
+    } else if (millis() - btnPressStart > 2500) {
+      // 2.5s Long-press -> Toggle Security Key Mode / Normal Mode!
+      btnPressStart = 0;
+      fidoSecurityKeyMode = !fidoSecurityKeyMode;
+      persistSettings();
+      if (fidoSecurityKeyMode) {
+        setStatus(0, 180, 255); // Cyan
+        logSystem("[MODE] Switching to Dedicated FIDO2 Passkey Mode... Rebooting");
+      } else {
+        setStatus(0, 255, 0); // Green
+        logSystem("[MODE] Switching to Normal HID/Ducky Mode... Rebooting");
+      }
+      delay(400);
+      ESP.restart();
+      return;
+    }
+  } else {
+    if (btnPressStart > 0) {
+      uint32_t pressDuration = millis() - btnPressStart;
+      btnPressStart = 0;
+      if (pressDuration < 2000) {
+        // Short press: FIDO touch confirmation or Vault TOTP type
+        if (FIDO.isWaitingForTouch()) {
+          FIDO.confirmTouch();
+          logSystem("[FIDO2] User Presence confirmed for " + FIDO.getPendingRpId());
+          setStatus(0, 255, 0);
+          delay(300);
+          setStatus(fidoSecurityKeyMode ? 0 : 0, fidoSecurityKeyMode ? 180 : 255, fidoSecurityKeyMode ? 255 : 0);
+        } else if (!fidoSecurityKeyMode && vaultUnlocked) {
+          // Auto-type first TOTP in unlocked vault
+          DynamicJsonDocument itemsDoc(8192);
+          if (deserializeJson(itemsDoc, vaultCachedJson) == DeserializationError::Ok && itemsDoc.is<JsonArray>()) {
+            JsonArray arr = itemsDoc.as<JsonArray>();
+            for (JsonObject obj : arr) {
+              String type = obj["type"] | "totp";
+              if (type == "totp" && obj.containsKey("secret")) {
+                time_t nowSec = time(nullptr);
+                int period = obj["period"] | 30;
+                int digits = obj["digits"] | 6;
+                String otp = calculateTotp(obj["secret"].as<String>(), nowSec, period, digits);
+                for (size_t c = 0; c < otp.length(); c++) {
+                  if(Keyboard) Keyboard->write(static_cast<uint8_t>(otp[c]));
+                  if (typeDelay > 0) delay(typeDelay);
+                }
+                delay(10);
+                keyboardTap(KEY_RETURN);
+                setStatus(0, 255, 0);
+                delay(150);
+                setStatus(0, 255, 0);
+                break;
               }
-              delay(10);
-              keyboardTap(KEY_RETURN);
-              pixels.setPixelColor(0, pixels.Color(0, 255, 0));
-              pixels.show();
-              delay(120);
-              pixels.setPixelColor(0, pixels.Color(0, 0, 0));
-              pixels.show();
-              break;
             }
           }
         }
