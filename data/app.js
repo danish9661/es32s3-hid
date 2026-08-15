@@ -1797,7 +1797,7 @@ function bindOtaControls() {
           if (statusSpan) statusSpan.textContent = `Rebooting... refreshing in ${countdown}s`;
           if (countdown <= 0) {
             clearInterval(countTimer);
-            window.location.reload();
+            window.location.href = "/login";
           }
         }, 1000);
       } else {
@@ -2803,7 +2803,10 @@ async function rebootDevice() {
   if (!confirm("Reboot ESP32 now?")) return;
   try {
     await api("/api/reboot", { method: "POST" });
-    setText("settings-status", "Reboot command sent. Device will reconnect shortly.");
+    setText("settings-status", "Reboot command sent. Redirecting to login in 6 seconds...");
+    setTimeout(() => {
+      window.location.href = "/login";
+    }, 6000);
   } catch (_) {
     setText("settings-status", "Failed to send reboot command.");
   }
