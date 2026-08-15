@@ -503,6 +503,7 @@ struct __attribute__((packed)) VaultHeader {
 
 static bool vaultUnlocked = false;
 static uint8_t vaultKey[VAULT_KEY_LEN] = {0};
+static uint8_t vaultSalt[VAULT_SALT_LEN] = {0};
 static uint32_t vaultLastActiveMs = 0;
 static String vaultCachedJson = "[]";
 
@@ -667,10 +668,8 @@ bool isVaultInitialized() {
 
 bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
   size_t plainLen = jsonPlaintext.length();
-  uint8_t salt[VAULT_SALT_LEN];
   uint8_t iv[VAULT_IV_LEN];
   uint8_t tag[VAULT_TAG_LEN];
-  esp_fill_random(salt, sizeof(salt));
   esp_fill_random(iv, sizeof(iv));
 
   uint8_t *cipherBuf = static_cast<uint8_t *>(malloc(plainLen + 1));
@@ -694,7 +693,7 @@ bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
 
   VaultHeader hdr;
   memcpy(hdr.magic, "VLT1", 4);
-  memcpy(hdr.salt, salt, VAULT_SALT_LEN);
+  memcpy(hdr.salt, vaultSalt, VAULT_SALT_LEN);
   memcpy(hdr.iv, iv, VAULT_IV_LEN);
   memcpy(hdr.tag, tag, VAULT_TAG_LEN);
   hdr.ciphertextLen = static_cast<uint32_t>(plainLen);
@@ -766,8 +765,10 @@ bool unlockVaultWithPassword(const String &password, uint64_t clientEpoch = 0) {
   }
   f.close();
 
+  memcpy(vaultSalt, hdr.salt, VAULT_SALT_LEN);
+
   uint8_t derivedKey[VAULT_KEY_LEN];
-  if (!pbkdf2DeriveKey(password, hdr.salt, VAULT_SALT_LEN, derivedKey)) {
+  if (!pbkdf2DeriveKey(password, vaultSalt, VAULT_SALT_LEN, derivedKey)) {
     free(cipherBuf);
     return false;
   }
@@ -4083,10 +4084,9 @@ void registerRoutes() {
         request->send(400, "application/json", "{\"error\":\"Password too short (min 6 chars)\"}");
         return;
       }
-      uint8_t salt[VAULT_SALT_LEN];
-      esp_fill_random(salt, sizeof(salt));
+      esp_fill_random(vaultSalt, sizeof(vaultSalt));
       uint8_t derivedKey[VAULT_KEY_LEN];
-      if (!pbkdf2DeriveKey(pass, salt, sizeof(salt), derivedKey)) {
+      if (!pbkdf2DeriveKey(pass, vaultSalt, sizeof(vaultSalt), derivedKey)) {
         request->send(500, "application/json", "{\"error\":\"Key derivation failed\"}");
         return;
       }
@@ -4094,7 +4094,10 @@ void registerRoutes() {
         request->send(500, "application/json", "{\"error\":\"Failed to initialize vault file\"}");
         return;
       }
-      unlockVaultWithPassword(pass);
+      memcpy(vaultKey, derivedKey, VAULT_KEY_LEN);
+      vaultUnlocked = true;
+      vaultLastActiveMs = millis();
+      vaultCachedJson = "[]";
       request->send(200, "application/json", "{\"ok\":true}");
     }
   );
