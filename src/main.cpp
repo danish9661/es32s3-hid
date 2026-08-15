@@ -4345,7 +4345,8 @@ void registerRoutes() {
     }
 
     DynamicJsonDocument itemsDoc(8192);
-    if (deserializeJson(itemsDoc, vaultCachedJson) != DeserializationError::Ok) {
+    DeserializationError dErr = deserializeJson(itemsDoc, vaultCachedJson);
+    if (dErr != DeserializationError::Ok || !itemsDoc.is<JsonArray>()) {
       itemsDoc.to<JsonArray>();
     }
 
@@ -4646,7 +4647,9 @@ void setup() {
   server.begin();
 
   setStatus(0, 255, 0);
-  Serial.println("Server started");
+  logSystem("[BOOT] ESP32-S3 HID Console initialized (FW: v" + String(FIRMWARE_VERSION) + ")");
+  logSystem("[NET] Web Server running. AP IP: " + WiFi.softAPIP().toString() + (WiFi.status() == WL_CONNECTED ? " | STA IP: " + WiFi.localIP().toString() : ""));
+  logSystem("[USB] HID Keyboard, Mouse & Consumer Control ready");
 }
 
 void checkPhysical2faTrigger() {

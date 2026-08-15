@@ -2963,9 +2963,12 @@ async function loadVaultEntries() {
       }
       return;
     }
-    vaultEntries = await res.json();
+    const data = await res.json();
+    vaultEntries = Array.isArray(data) ? data : [];
     renderVaultEntries();
-  } catch (_) {
+    setText("vault-action-status", "");
+  } catch (err) {
+    console.error("loadVaultEntries error", err);
     setText("vault-action-status", "Failed to load entries.");
   }
 }
