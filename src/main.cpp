@@ -2717,8 +2717,8 @@ uint8_t parseMouseButton(const String &name) {
 }
 
 void registerRoutes() {
-  server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("public, max-age=86400, must-revalidate");
-  server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("public, max-age=86400, must-revalidate");
+  server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("no-cache, must-revalidate");
+  server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("no-cache, must-revalidate");
 
   server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (LittleFS.exists("/favicon.ico")) {

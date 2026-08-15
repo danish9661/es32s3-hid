@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ESP32-S3 HID Console</title>
-  <link rel="stylesheet" href="/styles.css?v=2.2.0">
+  <link rel="stylesheet" href="/styles.css?v=2.3.0">
 </head>
 <body>
   <div class="layout">
@@ -547,12 +547,11 @@
           <!-- Speed Preset Segmented Control -->
           <div class="speed-seg-wrap">
             <div class="speed-seg-track" id="speed-seg-track">
-              <div class="speed-seg-indicator" id="speed-seg-indicator"></div>
-              <button class="speed-seg-btn" data-preset="ultrafast" id="seg-ultrafast">Ultra Fast</button>
-              <button class="speed-seg-btn" data-preset="fast"      id="seg-fast">Fast</button>
-              <button class="speed-seg-btn" data-preset="balanced"  id="seg-balanced">Balanced</button>
-              <button class="speed-seg-btn" data-preset="human"     id="seg-human">Human</button>
-              <button class="speed-seg-btn seg-custom" data-preset="custom" id="seg-custom">Custom</button>
+              <button type="button" class="speed-seg-btn" data-preset="ultrafast" id="seg-ultrafast">Ultra Fast</button>
+              <button type="button" class="speed-seg-btn" data-preset="fast"      id="seg-fast">Fast</button>
+              <button type="button" class="speed-seg-btn active" data-preset="balanced" id="seg-balanced">Balanced</button>
+              <button type="button" class="speed-seg-btn" data-preset="human"     id="seg-human">Human</button>
+              <button type="button" class="speed-seg-btn" data-preset="custom"    id="seg-custom">Custom</button>
             </div>
           </div>
           <div class="preset-os-note" id="preset-os-note"></div>
@@ -738,7 +737,22 @@
               <h4>Flash ESP32-S3 over WiFi</h4>
               <span id="ota-mode-badge" class="badge">Firmware</span>
             </div>
-            <p class="small">Upload and flash compiled binaries (<code>firmware.bin</code> or <code>littlefs.bin</code>) directly from your browser without requiring a USB cable.</p>
+            <div class="system-version-card">
+              <div class="version-item">
+                <span class="version-label">Firmware (Flash)</span>
+                <strong id="ota-fw-version-display" class="version-val">Loading...</strong>
+              </div>
+              <div class="version-item">
+                <span class="version-label">Filesystem (LittleFS)</span>
+                <strong id="ota-ui-version-display" class="version-val">v2.3.0</strong>
+              </div>
+              <div class="version-item">
+                <span class="version-label">Build Timestamp</span>
+                <strong id="ota-build-date-display" class="version-val">--</strong>
+              </div>
+            </div>
+
+            <p class="small" style="margin-top:10px;">Upload and flash compiled binaries (<code>firmware.bin</code> or <code>littlefs.bin</code>) directly from your browser without requiring a USB cable.</p>
 
             <div class="ota-type-selector">
               <label class="radio-inline">
@@ -799,6 +813,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=2.2.0"></script>
+  <script src="/app.js?v=2.3.0"></script>
 </body>
 </html>

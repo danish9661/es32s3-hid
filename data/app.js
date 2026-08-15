@@ -110,19 +110,14 @@ let _suppressCustomSwitch = false;
 
 function setPresetSegment(name) {
   const track = qs("speed-seg-track");
-  const indicator = qs("speed-seg-indicator");
-  if (!track || !indicator) return;
+  if (!track) return;
 
-  track.setAttribute("data-active", name);
-
-  // Use actual pixel rects — reliable regardless of padding/border/zoom
-  const btn = qs(`seg-${name}`);
-  if (btn) {
-    const trackRect = track.getBoundingClientRect();
-    const btnRect   = btn.getBoundingClientRect();
-    indicator.style.left  = (btnRect.left - trackRect.left) + "px";
-    indicator.style.width = btnRect.width + "px";
-  }
+  SEG_ORDER.forEach(seg => {
+    const btn = qs(`seg-${seg}`);
+    if (btn) {
+      btn.classList.toggle("active", seg === name);
+    }
+  });
 
   // Update OS note
   const note = qs("preset-os-note");
@@ -2691,10 +2686,16 @@ async function loadSettings() {
     );
     requestAnimationFrame(() => setPresetSegment(activePreset));
 
-    // Show firmware version badge
+    // Show firmware version badge and OTA card info
     if (d.fw_version) {
       const badge = qs("fw-version-badge");
       if (badge) badge.textContent = `FW: v${d.fw_version}`;
+      const otaFw = qs("ota-fw-version-display");
+      if (otaFw) otaFw.textContent = `v${d.fw_version}`;
+    }
+    if (d.build_date) {
+      const otaBuild = qs("ota-build-date-display");
+      if (otaBuild) otaBuild.textContent = d.build_date;
     }
 
     updateVendorPresetSelectionFromFields();
