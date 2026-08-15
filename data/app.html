@@ -21,6 +21,7 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="editor">Editor</button>
       <button class="tab-btn" data-tab="remote">Remote</button>
+      <button class="tab-btn" data-tab="vault">Vault & 2FA</button>
       <button class="tab-btn" data-tab="kvm">KVM</button>
       <button class="tab-btn" data-tab="keyboard">Keyboard</button>
       <button class="tab-btn" data-tab="mouse">Mouse</button>
@@ -102,6 +103,131 @@
             <input id="import-pref-input" type="file" accept="application/json" class="hidden-input">
           </div>
           <p class="small">One-click export/import for custom quick actions and keyboard preferences.</p>
+        </div>
+      </section>
+
+      <section id="view-vault" class="view">
+        <div class="panel vault-box">
+          
+          <!-- State 1: Uninitialized Setup Screen -->
+          <div id="vault-setup-card" class="vault-card hidden">
+            <div class="vault-hero">
+              <div class="vault-icon-large">🔐</div>
+              <h2>Create Encrypted Hardware Vault</h2>
+              <p class="small">Protect your 2FA TOTP Authenticator seeds and login credentials using hardware-accelerated <strong>AES-256-GCM</strong> encryption. Your Master Password is never stored in Flash.</p>
+            </div>
+            <div class="vault-form" style="max-width:440px; margin:0 auto;">
+              <label class="label" for="vault-setup-pass">Create Master Password (min 6 chars)</label>
+              <input class="input" id="vault-setup-pass" type="password" placeholder="Enter strong master password">
+              <label class="label" for="vault-setup-pass-confirm" style="margin-top:10px;">Confirm Master Password</label>
+              <input class="input" id="vault-setup-pass-confirm" type="password" placeholder="Confirm master password">
+              <button id="vault-setup-btn" class="btn-primary" style="margin-top:16px; width:100%;">Create & Initialize Vault</button>
+              <div id="vault-setup-status" class="status-line"></div>
+            </div>
+          </div>
+
+          <!-- State 2: Locked Screen -->
+          <div id="vault-locked-card" class="vault-card hidden">
+            <div class="vault-hero">
+              <div class="vault-icon-large">🔒</div>
+              <h2>Hardware Vault is Locked</h2>
+              <p class="small">Enter your Master Password to decrypt your 2FA seeds and credential vault into volatile RAM.</p>
+            </div>
+            <div class="vault-form" style="max-width:440px; margin:0 auto;">
+              <label class="label" for="vault-unlock-pass">Master Password</label>
+              <div class="token-row">
+                <input class="input" id="vault-unlock-pass" type="password" placeholder="Enter Master Password">
+                <button id="vault-unlock-btn" class="btn-primary">Unlock Vault</button>
+              </div>
+              <div id="vault-lock-status" class="status-line"></div>
+            </div>
+          </div>
+
+          <!-- State 3: Unlocked Dashboard -->
+          <div id="vault-unlocked-card" class="vault-dashboard hidden">
+            <div class="vault-topbar">
+              <div class="vault-top-left">
+                <h2>🔐 Vault & 2FA Authenticator</h2>
+                <span id="vault-autolock-badge" class="badge ok">Unlocked (5:00)</span>
+              </div>
+              <div class="vault-top-actions">
+                <input class="input" id="vault-search-input" type="text" placeholder="Search accounts..." style="max-width:180px; padding:4px 10px; font-size:0.85rem;">
+                <button id="vault-add-item-btn" class="btn-primary btn-sm">+ Add Item</button>
+                <button id="vault-lock-btn" class="btn-outline btn-sm">🔒 Lock</button>
+              </div>
+            </div>
+
+            <div id="vault-items-grid" class="vault-grid">
+              <!-- Dynamically populated TOTP & Password cards -->
+            </div>
+            <div id="vault-empty-state" class="vault-empty hidden">
+              <p>No items in your vault yet. Click <strong>+ Add Item</strong> to add your first 2FA authenticator or password.</p>
+            </div>
+            <div id="vault-action-status" class="status-line"></div>
+          </div>
+
+          <!-- Add / Edit Modal -->
+          <div id="vault-modal" class="modal-overlay hidden">
+            <div class="modal-card">
+              <div class="modal-head">
+                <h3 id="vault-modal-title">Add Vault Item</h3>
+                <button id="vault-modal-close" class="btn-outline btn-sm">✕</button>
+              </div>
+              <div class="modal-body">
+                <input type="hidden" id="vault-item-id">
+                <label class="label" for="vault-item-type">Item Type</label>
+                <select class="input" id="vault-item-type">
+                  <option value="totp">⏱️ 2FA Authenticator Token (TOTP)</option>
+                  <option value="pass">🔑 Login Credential / Password</option>
+                </select>
+
+                <div style="margin-top:10px;">
+                  <label class="label" for="vault-item-label">Account / Service Name</label>
+                  <input class="input" id="vault-item-label" type="text" placeholder="e.g. GitHub, Google, AWS">
+                </div>
+
+                <!-- TOTP Specific Fields -->
+                <div id="vault-totp-fields" style="margin-top:10px;">
+                  <label class="label" for="vault-item-secret">2FA Secret Key (Base32)</label>
+                  <input class="input" id="vault-item-secret" type="text" placeholder="e.g. JBSWY3DPEHPK3PXP" autocomplete="off" spellcheck="false">
+                  <div class="settings-grid" style="margin-top:8px;">
+                    <div>
+                      <label class="label" for="vault-item-digits">Digits</label>
+                      <select class="input" id="vault-item-digits">
+                        <option value="6" selected>6 digits (Standard)</option>
+                        <option value="8">8 digits</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label" for="vault-item-period">Period (Seconds)</label>
+                      <input class="input" id="vault-item-period" type="number" value="30" min="15" max="120">
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Password Specific Fields -->
+                <div id="vault-pass-fields" class="hidden" style="margin-top:10px;">
+                  <label class="label" for="vault-item-user">Username / Email</label>
+                  <input class="input" id="vault-item-user" type="text" placeholder="user@example.com">
+                  <label class="label" for="vault-item-pass" style="margin-top:8px;">Password</label>
+                  <div class="token-row">
+                    <input class="input" id="vault-item-pass" type="text" placeholder="Password">
+                    <button type="button" id="vault-gen-pass-btn" class="btn-outline btn-sm">Generate</button>
+                  </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                  <label class="label" for="vault-item-notes">Notes (Optional)</label>
+                  <input class="input" id="vault-item-notes" type="text" placeholder="Optional notes">
+                </div>
+              </div>
+              <div class="modal-actions" style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
+                <button id="vault-modal-cancel" class="btn-outline">Cancel</button>
+                <button id="vault-modal-save" class="btn-primary">Save Entry</button>
+              </div>
+            </div>
+          </div>
+
         </div>
       </section>
 

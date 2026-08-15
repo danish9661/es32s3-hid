@@ -15,7 +15,14 @@
 #include "USBHIDConsumerControl.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_random.h"
+#include "mbedtls/gcm.h"
+#include "mbedtls/pkcs5.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/md.h"
 #include <cstring>
+#include <time.h>
+#include <sys/time.h>
 
 // --- KEY DEFINITIONS ---
 #ifndef KEY_PRINT_SCREEN
@@ -471,6 +478,361 @@ void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t 
       Mouse.click(clickButton);
     }
   }
+}
+
+// --- ENCRYPTED VAULT & 2FA HARDWARE AUTHENTICATOR SUBSYSTEM ---
+static constexpr const char *VAULT_FILE = "/vault.enc";
+static constexpr size_t VAULT_SALT_LEN = 16;
+static constexpr size_t VAULT_IV_LEN = 12;
+static constexpr size_t VAULT_TAG_LEN = 16;
+static constexpr size_t VAULT_KEY_LEN = 32;
+static constexpr uint32_t VAULT_PBKDF2_ITERATIONS = 10000;
+static constexpr uint32_t VAULT_AUTO_LOCK_MS = 300000;
+
+struct VaultHeader {
+  char magic[4];
+  uint8_t salt[VAULT_SALT_LEN];
+  uint8_t iv[VAULT_IV_LEN];
+  uint8_t tag[VAULT_TAG_LEN];
+  uint32_t ciphertextLen;
+};
+
+static bool vaultUnlocked = false;
+static uint8_t vaultKey[VAULT_KEY_LEN] = {0};
+static uint32_t vaultLastActiveMs = 0;
+static String vaultCachedJson = "[]";
+
+void lockVault() {
+  vaultUnlocked = false;
+  memset(vaultKey, 0, sizeof(vaultKey));
+  vaultCachedJson = "[]";
+  vaultLastActiveMs = 0;
+}
+
+void touchVaultActivity() {
+  if (vaultUnlocked) {
+    vaultLastActiveMs = millis();
+  }
+}
+
+void checkVaultAutoLock() {
+  if (vaultUnlocked && (millis() - vaultLastActiveMs > VAULT_AUTO_LOCK_MS)) {
+    lockVault();
+  }
+}
+
+bool pbkdf2DeriveKey(const String &password, const uint8_t *salt, size_t saltLen, uint8_t *keyOut) {
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!info) return false;
+
+  int ret = mbedtls_md_setup(&ctx, info, 1);
+  if (ret != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+
+  ret = mbedtls_pkcs5_pbkdf2_hmac(
+    &ctx,
+    reinterpret_cast<const unsigned char *>(password.c_str()),
+    password.length(),
+    salt,
+    saltLen,
+    VAULT_PBKDF2_ITERATIONS,
+    VAULT_KEY_LEN,
+    keyOut
+  );
+  mbedtls_md_free(&ctx);
+  return (ret == 0);
+}
+
+bool aes256GcmEncrypt(
+  const uint8_t *key,
+  const uint8_t *iv,
+  size_t ivLen,
+  const uint8_t *plaintext,
+  size_t plainLen,
+  uint8_t *ciphertext,
+  uint8_t *tag,
+  size_t tagLen
+) {
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+  if (ret != 0) {
+    mbedtls_gcm_free(&gcm);
+    return false;
+  }
+
+  ret = mbedtls_gcm_crypt_and_tag(
+    &gcm,
+    MBEDTLS_GCM_ENCRYPT,
+    plainLen,
+    iv,
+    ivLen,
+    nullptr,
+    0,
+    plaintext,
+    ciphertext,
+    tagLen,
+    tag
+  );
+  mbedtls_gcm_free(&gcm);
+  return (ret == 0);
+}
+
+bool aes256GcmDecrypt(
+  const uint8_t *key,
+  const uint8_t *iv,
+  size_t ivLen,
+  const uint8_t *tag,
+  size_t tagLen,
+  const uint8_t *ciphertext,
+  size_t cipherLen,
+  uint8_t *plaintext
+) {
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+  if (ret != 0) {
+    mbedtls_gcm_free(&gcm);
+    return false;
+  }
+
+  ret = mbedtls_gcm_auth_decrypt(
+    &gcm,
+    cipherLen,
+    iv,
+    ivLen,
+    nullptr,
+    0,
+    tag,
+    tagLen,
+    ciphertext,
+    plaintext
+  );
+  mbedtls_gcm_free(&gcm);
+  return (ret == 0);
+}
+
+bool isVaultInitialized() {
+  return LittleFS.exists(VAULT_FILE);
+}
+
+bool saveVaultEncrypted(const String &jsonPlaintext, const uint8_t *key) {
+  size_t plainLen = jsonPlaintext.length();
+  uint8_t salt[VAULT_SALT_LEN];
+  uint8_t iv[VAULT_IV_LEN];
+  uint8_t tag[VAULT_TAG_LEN];
+  esp_fill_random(salt, sizeof(salt));
+  esp_fill_random(iv, sizeof(iv));
+
+  uint8_t *cipherBuf = static_cast<uint8_t *>(malloc(plainLen + 1));
+  if (!cipherBuf) return false;
+
+  bool ok = aes256GcmEncrypt(
+    key,
+    iv,
+    sizeof(iv),
+    reinterpret_cast<const uint8_t *>(jsonPlaintext.c_str()),
+    plainLen,
+    cipherBuf,
+    tag,
+    sizeof(tag)
+  );
+
+  if (!ok) {
+    free(cipherBuf);
+    return false;
+  }
+
+  File f = LittleFS.open(VAULT_FILE, "w");
+  if (!f) {
+    free(cipherBuf);
+    return false;
+  }
+
+  VaultHeader hdr;
+  memcpy(hdr.magic, "VLT1", 4);
+  memcpy(hdr.salt, salt, VAULT_SALT_LEN);
+  memcpy(hdr.iv, iv, VAULT_IV_LEN);
+  memcpy(hdr.tag, tag, VAULT_TAG_LEN);
+  hdr.ciphertextLen = static_cast<uint32_t>(plainLen);
+
+  f.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
+  if (plainLen > 0) {
+    f.write(cipherBuf, plainLen);
+  }
+  f.close();
+  free(cipherBuf);
+  return true;
+}
+
+bool unlockVaultWithPassword(const String &password, uint64_t clientEpoch = 0) {
+  if (password.isEmpty()) return false;
+  if (!isVaultInitialized()) return false;
+
+  File f = LittleFS.open(VAULT_FILE, "r");
+  if (!f) return false;
+
+  if (f.size() < sizeof(VaultHeader)) {
+    f.close();
+    return false;
+  }
+
+  VaultHeader hdr;
+  if (f.read(reinterpret_cast<uint8_t *>(&hdr), sizeof(hdr)) != sizeof(hdr)) {
+    f.close();
+    return false;
+  }
+
+  if (memcmp(hdr.magic, "VLT1", 4) != 0) {
+    f.close();
+    return false;
+  }
+
+  uint32_t cipherLen = hdr.ciphertextLen;
+  if (f.size() < sizeof(VaultHeader) + cipherLen) {
+    f.close();
+    return false;
+  }
+
+  uint8_t *cipherBuf = static_cast<uint8_t *>(malloc(cipherLen + 1));
+  if (!cipherBuf) {
+    f.close();
+    return false;
+  }
+
+  if (cipherLen > 0 && f.read(cipherBuf, cipherLen) != cipherLen) {
+    free(cipherBuf);
+    f.close();
+    return false;
+  }
+  f.close();
+
+  uint8_t derivedKey[VAULT_KEY_LEN];
+  if (!pbkdf2DeriveKey(password, hdr.salt, VAULT_SALT_LEN, derivedKey)) {
+    free(cipherBuf);
+    return false;
+  }
+
+  uint8_t *plainBuf = static_cast<uint8_t *>(malloc(cipherLen + 1));
+  if (!plainBuf) {
+    free(cipherBuf);
+    return false;
+  }
+
+  bool ok = aes256GcmDecrypt(
+    derivedKey,
+    hdr.iv,
+    VAULT_IV_LEN,
+    hdr.tag,
+    VAULT_TAG_LEN,
+    cipherBuf,
+    cipherLen,
+    plainBuf
+  );
+  free(cipherBuf);
+
+  if (!ok) {
+    free(plainBuf);
+    return false;
+  }
+
+  plainBuf[cipherLen] = '\0';
+  vaultCachedJson = reinterpret_cast<char *>(plainBuf);
+  free(plainBuf);
+
+  memcpy(vaultKey, derivedKey, VAULT_KEY_LEN);
+  vaultUnlocked = true;
+  vaultLastActiveMs = millis();
+
+  if (clientEpoch > 1700000000ULL) {
+    struct timeval tv;
+    tv.tv_sec = static_cast<time_t>(clientEpoch);
+    tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+  }
+
+  return true;
+}
+
+size_t decodeBase32(const String &b32, uint8_t *out, size_t maxOutLen) {
+  String clean = b32;
+  clean.toUpperCase();
+  clean.trim();
+  size_t outIdx = 0;
+  uint32_t buffer = 0;
+  int bitsLeft = 0;
+
+  for (size_t i = 0; i < clean.length(); i++) {
+    char c = clean[i];
+    if (c == ' ' || c == '-' || c == '=') continue;
+
+    int val = -1;
+    if (c >= 'A' && c <= 'Z') val = c - 'A';
+    else if (c >= '2' && c <= '7') val = c - '2' + 26;
+    if (val < 0) continue;
+
+    buffer = (buffer << 5) | (val & 0x1F);
+    bitsLeft += 5;
+    if (bitsLeft >= 8) {
+      bitsLeft -= 8;
+      if (outIdx < maxOutLen) {
+        out[outIdx++] = static_cast<uint8_t>((buffer >> bitsLeft) & 0xFF);
+      }
+    }
+  }
+  return outIdx;
+}
+
+String calculateTotp(const String &secretBase32, uint64_t epochSeconds, int period = 30, int digits = 6) {
+  if (period <= 0) period = 30;
+  if (digits < 6 || digits > 8) digits = 6;
+
+  uint8_t keyBytes[64];
+  size_t keyLen = decodeBase32(secretBase32, keyBytes, sizeof(keyBytes));
+  if (keyLen == 0) return "000000";
+
+  uint64_t step = epochSeconds / period;
+  uint8_t msg[8];
+  for (int i = 7; i >= 0; i--) {
+    msg[i] = static_cast<uint8_t>(step & 0xFF);
+    step >>= 8;
+  }
+
+  uint8_t hmacRes[20];
+  mbedtls_md_context_t md_ctx;
+  mbedtls_md_init(&md_ctx);
+  const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+  mbedtls_md_setup(&md_ctx, md_info, 1);
+  mbedtls_md_hmac_starts(&md_ctx, keyBytes, keyLen);
+  mbedtls_md_hmac_update(&md_ctx, msg, sizeof(msg));
+  mbedtls_md_hmac_finish(&md_ctx, hmacRes);
+  mbedtls_md_free(&md_ctx);
+
+  int offset = hmacRes[19] & 0x0F;
+  uint32_t truncated = (
+    ((hmacRes[offset] & 0x7F) << 24) |
+    ((hmacRes[offset + 1] & 0xFF) << 16) |
+    ((hmacRes[offset + 2] & 0xFF) << 8) |
+    (hmacRes[offset + 3] & 0xFF)
+  );
+
+  uint32_t mod = 1;
+  for (int d = 0; d < digits; d++) mod *= 10;
+  uint32_t code = truncated % mod;
+
+  char buf[12];
+  if (digits == 8) {
+    snprintf(buf, sizeof(buf), "%08u", code);
+  } else if (digits == 7) {
+    snprintf(buf, sizeof(buf), "%07u", code);
+  } else {
+    snprintf(buf, sizeof(buf), "%06u", code);
+  }
+  return String(buf);
 }
 
 bool parseUint16String(const String &raw, uint16_t &out) {
@@ -3481,6 +3843,325 @@ void registerRoutes() {
           Update.printError(Serial);
         }
       }
+    }
+  );
+
+  // --- ENCRYPTED VAULT & 2FA AUTHENTICATOR ROUTES ---
+  server.on("/api/vault/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    checkVaultAutoLock();
+    DynamicJsonDocument doc(256);
+    doc["initialized"] = isVaultInitialized();
+    doc["unlocked"] = vaultUnlocked;
+    doc["lock_timeout_sec"] = vaultUnlocked ? (VAULT_AUTO_LOCK_MS - (millis() - vaultLastActiveMs)) / 1000 : 0;
+
+    int count = 0;
+    if (vaultUnlocked) {
+      DynamicJsonDocument itemsDoc(4096);
+      if (deserializeJson(itemsDoc, vaultCachedJson) == DeserializationError::Ok && itemsDoc.is<JsonArray>()) {
+        count = itemsDoc.as<JsonArray>().size();
+      }
+    }
+    doc["entry_count"] = count;
+
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on(
+    "/api/vault/setup",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (isVaultInitialized()) {
+        request->send(400, "application/json", "{\"error\":\"Vault already initialized\"}");
+        return;
+      }
+      DynamicJsonDocument doc(512);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok || !doc.containsKey("password")) {
+        request->send(400, "application/json", "{\"error\":\"Invalid payload\"}");
+        return;
+      }
+      String pass = doc["password"].as<String>();
+      if (pass.length() < 6) {
+        request->send(400, "application/json", "{\"error\":\"Password too short (min 6 chars)\"}");
+        return;
+      }
+      uint8_t salt[VAULT_SALT_LEN];
+      esp_fill_random(salt, sizeof(salt));
+      uint8_t derivedKey[VAULT_KEY_LEN];
+      if (!pbkdf2DeriveKey(pass, salt, sizeof(salt), derivedKey)) {
+        request->send(500, "application/json", "{\"error\":\"Key derivation failed\"}");
+        return;
+      }
+      if (!saveVaultEncrypted("[]", derivedKey)) {
+        request->send(500, "application/json", "{\"error\":\"Failed to initialize vault file\"}");
+        return;
+      }
+      unlockVaultWithPassword(pass);
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
+    "/api/vault/unlock",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      DynamicJsonDocument doc(512);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok || !doc.containsKey("password")) {
+        request->send(400, "application/json", "{\"error\":\"Invalid payload\"}");
+        return;
+      }
+      String pass = doc["password"].as<String>();
+      uint64_t epoch = doc["epoch"] | 0ULL;
+      if (unlockVaultWithPassword(pass, epoch)) {
+        request->send(200, "application/json", "{\"ok\":true}");
+      } else {
+        request->send(401, "application/json", "{\"error\":\"Incorrect Master Password\"}");
+      }
+    }
+  );
+
+  server.on("/api/vault/lock", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    lockVault();
+    request->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/vault/entries", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    checkVaultAutoLock();
+    if (!vaultUnlocked) {
+      request->send(403, "application/json", "{\"error\":\"Vault is locked\"}");
+      return;
+    }
+    touchVaultActivity();
+
+    DynamicJsonDocument itemsDoc(8192);
+    if (deserializeJson(itemsDoc, vaultCachedJson) != DeserializationError::Ok) {
+      itemsDoc.to<JsonArray>();
+    }
+
+    time_t nowSec = time(nullptr);
+    JsonArray arr = itemsDoc.as<JsonArray>();
+    for (JsonObject obj : arr) {
+      String type = obj["type"] | "totp";
+      if (type == "totp" && obj.containsKey("secret")) {
+        int period = obj["period"] | 30;
+        int digits = obj["digits"] | 6;
+        String secret = obj["secret"].as<String>();
+        obj["otp"] = calculateTotp(secret, nowSec, period, digits);
+        obj["remaining"] = period - (nowSec % period);
+      }
+    }
+
+    String out;
+    serializeJson(itemsDoc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on(
+    "/api/vault/entry/save",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      checkVaultAutoLock();
+      if (!vaultUnlocked) {
+        request->send(403, "application/json", "{\"error\":\"Vault is locked\"}");
+        return;
+      }
+      touchVaultActivity();
+
+      DynamicJsonDocument doc(1024);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+
+      DynamicJsonDocument itemsDoc(8192);
+      deserializeJson(itemsDoc, vaultCachedJson);
+      JsonArray arr = itemsDoc.as<JsonArray>();
+
+      String id = doc["id"] | "";
+      if (id.isEmpty()) {
+        id = String(millis()) + String(random(100, 999));
+        doc["id"] = id;
+      }
+
+      bool updated = false;
+      for (size_t i = 0; i < arr.size(); i++) {
+        if (arr[i]["id"] == id) {
+          arr[i] = doc.as<JsonObject>();
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) {
+        arr.add(doc.as<JsonObject>());
+      }
+
+      String updatedJson;
+      serializeJson(itemsDoc, updatedJson);
+      if (saveVaultEncrypted(updatedJson, vaultKey)) {
+        vaultCachedJson = updatedJson;
+        request->send(200, "application/json", "{\"ok\":true}");
+      } else {
+        request->send(500, "application/json", "{\"error\":\"Failed to save encrypted vault\"}");
+      }
+    }
+  );
+
+  server.on(
+    "/api/vault/entry/delete",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      checkVaultAutoLock();
+      if (!vaultUnlocked) {
+        request->send(403, "application/json", "{\"error\":\"Vault is locked\"}");
+        return;
+      }
+      touchVaultActivity();
+
+      DynamicJsonDocument doc(256);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok || !doc.containsKey("id")) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+
+      String id = doc["id"].as<String>();
+      DynamicJsonDocument itemsDoc(8192);
+      deserializeJson(itemsDoc, vaultCachedJson);
+      JsonArray arr = itemsDoc.as<JsonArray>();
+
+      for (size_t i = 0; i < arr.size(); i++) {
+        if (arr[i]["id"] == id) {
+          arr.remove(i);
+          break;
+        }
+      }
+
+      String updatedJson;
+      serializeJson(itemsDoc, updatedJson);
+      if (saveVaultEncrypted(updatedJson, vaultKey)) {
+        vaultCachedJson = updatedJson;
+        request->send(200, "application/json", "{\"ok\":true}");
+      } else {
+        request->send(500, "application/json", "{\"error\":\"Failed to save encrypted vault\"}");
+      }
+    }
+  );
+
+  server.on(
+    "/api/vault/type",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      checkVaultAutoLock();
+      if (!vaultUnlocked) {
+        request->send(403, "application/json", "{\"error\":\"Vault is locked\"}");
+        return;
+      }
+      touchVaultActivity();
+
+      DynamicJsonDocument doc(512);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok || !doc.containsKey("id")) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+
+      String id = doc["id"].as<String>();
+      String action = doc["action"] | "otp";
+
+      DynamicJsonDocument itemsDoc(8192);
+      deserializeJson(itemsDoc, vaultCachedJson);
+      JsonArray arr = itemsDoc.as<JsonArray>();
+
+      JsonObject target;
+      for (JsonObject obj : arr) {
+        if (obj["id"] == id) {
+          target = obj;
+          break;
+        }
+      }
+
+      if (target.isNull()) {
+        request->send(404, "application/json", "{\"error\":\"Entry not found\"}");
+        return;
+      }
+
+      time_t nowSec = time(nullptr);
+      if (action == "otp" && target.containsKey("secret")) {
+        int period = target["period"] | 30;
+        int digits = target["digits"] | 6;
+        String otp = calculateTotp(target["secret"].as<String>(), nowSec, period, digits);
+        for (size_t c = 0; c < otp.length(); c++) {
+          Keyboard.write(static_cast<uint8_t>(otp[c]));
+          if (typeDelay > 0) delay(typeDelay);
+        }
+        if (doc["enter"] | true) {
+          delay(10);
+          keyboardTap(KEY_RETURN);
+        }
+      } else if (action == "user" && target.containsKey("user")) {
+        String u = target["user"].as<String>();
+        for (size_t c = 0; c < u.length(); c++) {
+          Keyboard.write(static_cast<uint8_t>(u[c]));
+          if (typeDelay > 0) delay(typeDelay);
+        }
+      } else if (action == "pass" && target.containsKey("pass")) {
+        String p = target["pass"].as<String>();
+        for (size_t c = 0; c < p.length(); c++) {
+          Keyboard.write(static_cast<uint8_t>(p[c]));
+          if (typeDelay > 0) delay(typeDelay);
+        }
+        if (doc["enter"] | false) {
+          delay(10);
+          keyboardTap(KEY_RETURN);
+        }
+      } else if (action == "both" && target.containsKey("user") && target.containsKey("pass")) {
+        String u = target["user"].as<String>();
+        for (size_t c = 0; c < u.length(); c++) {
+          Keyboard.write(static_cast<uint8_t>(u[c]));
+          if (typeDelay > 0) delay(typeDelay);
+        }
+        delay(20);
+        keyboardTap(KEY_TAB);
+        delay(20);
+        String p = target["pass"].as<String>();
+        for (size_t c = 0; c < p.length(); c++) {
+          Keyboard.write(static_cast<uint8_t>(p[c]));
+          if (typeDelay > 0) delay(typeDelay);
+        }
+        if (doc["enter"] | true) {
+          delay(10);
+          keyboardTap(KEY_RETURN);
+        }
+      }
+
+      request->send(200, "application/json", "{\"ok\":true}");
     }
   );
 }

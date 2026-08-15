@@ -2686,6 +2686,395 @@ async function logout() {
   window.location.href = "/login";
 }
 
+// --- ENCRYPTED VAULT & 2FA AUTHENTICATOR CLIENT ---
+let vaultStatus = { initialized: false, unlocked: false, lock_timeout_sec: 0, entry_count: 0 };
+let vaultEntries = [];
+let vaultTickerTimer = null;
+
+async function refreshVaultView() {
+  try {
+    const res = await api("/api/vault/status");
+    if (!res.ok) return;
+    vaultStatus = await res.json();
+
+    const setupCard = qs("vault-setup-card");
+    const lockedCard = qs("vault-locked-card");
+    const unlockedCard = qs("vault-unlocked-card");
+
+    if (!vaultStatus.initialized) {
+      setupCard?.classList.remove("hidden");
+      lockedCard?.classList.add("hidden");
+      unlockedCard?.classList.add("hidden");
+    } else if (!vaultStatus.unlocked) {
+      setupCard?.classList.add("hidden");
+      lockedCard?.classList.remove("hidden");
+      unlockedCard?.classList.add("hidden");
+    } else {
+      setupCard?.classList.add("hidden");
+      lockedCard?.classList.add("hidden");
+      unlockedCard?.classList.remove("hidden");
+      await loadVaultEntries();
+      startVaultTicker();
+    }
+  } catch (_) {
+    setText("vault-action-status", "Failed to load vault status.");
+  }
+}
+
+async function loadVaultEntries() {
+  try {
+    const res = await api("/api/vault/entries");
+    if (!res.ok) {
+      if (res.status === 403) {
+        refreshVaultView();
+      }
+      return;
+    }
+    vaultEntries = await res.json();
+    renderVaultEntries();
+  } catch (_) {
+    setText("vault-action-status", "Failed to load entries.");
+  }
+}
+
+function renderVaultEntries() {
+  const grid = qs("vault-items-grid");
+  const emptyState = qs("vault-empty-state");
+  const search = (qs("vault-search-input")?.value || "").trim().toLowerCase();
+  if (!grid) return;
+
+  grid.innerHTML = "";
+
+  const filtered = vaultEntries.filter((item) => {
+    if (!search) return true;
+    const label = (item.label || "").toLowerCase();
+    const user = (item.user || "").toLowerCase();
+    const issuer = (item.issuer || "").toLowerCase();
+    return label.includes(search) || user.includes(search) || issuer.includes(search);
+  });
+
+  if (filtered.length === 0) {
+    emptyState?.classList.remove("hidden");
+    return;
+  }
+  emptyState?.classList.add("hidden");
+
+  filtered.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "vault-item";
+
+    const isTotp = (item.type === "totp");
+    const title = item.label || (isTotp ? "2FA Authenticator" : "Password Entry");
+    const sub = isTotp ? (item.issuer || "TOTP Token") : (item.user || "");
+
+    let innerHtml = `
+      <div class="vault-item-head">
+        <div>
+          <div class="vault-item-title">${escapeHtml(title)}</div>
+          <div class="vault-item-sub">${escapeHtml(sub)}</div>
+        </div>
+        <span class="badge ${isTotp ? "ok" : ""}">${isTotp ? "2FA OTP" : "LOGIN"}</span>
+      </div>
+    `;
+
+    if (isTotp) {
+      const otpCode = item.otp || "000000";
+      const remaining = Number.isFinite(item.remaining) ? item.remaining : 30;
+      innerHtml += `
+        <div class="vault-totp-display">
+          <span class="totp-digits" id="otp-digits-${item.id}">${otpCode.slice(0, 3)} ${otpCode.slice(3)}</span>
+          <span class="totp-timer" id="otp-timer-${item.id}">${remaining}s</span>
+        </div>
+        <div class="vault-item-actions">
+          <button class="btn-primary btn-sm" data-vault-type="otp" data-vault-id="${item.id}">Type Code + ↵</button>
+          <button class="btn-outline btn-sm" data-vault-copy="otp" data-vault-code="${otpCode}">Copy</button>
+          <button class="btn-outline btn-sm" data-vault-edit="${item.id}">Edit</button>
+          <button class="btn-danger btn-sm" data-vault-del="${item.id}">Delete</button>
+        </div>
+      `;
+    } else {
+      const maskedPass = item.pass ? "••••••••••••" : "(empty)";
+      innerHtml += `
+        <div style="font-family:monospace; font-size:0.9rem; background:rgba(0,0,0,0.3); padding:8px 12px; border-radius:6px;">
+          <div>User: <strong style="color:#5fe3a1;">${escapeHtml(item.user || "N/A")}</strong></div>
+          <div style="margin-top:4px;">Pass: <span id="pass-text-${item.id}">${maskedPass}</span></div>
+        </div>
+        <div class="vault-item-actions">
+          <button class="btn-primary btn-sm" data-vault-type="both" data-vault-id="${item.id}">Type Both + ↵</button>
+          <button class="btn-outline btn-sm" data-vault-type="pass" data-vault-id="${item.id}">Type Pass</button>
+          <button class="btn-outline btn-sm" data-vault-type="user" data-vault-id="${item.id}">Type User</button>
+          <button class="btn-outline btn-sm" data-vault-reveal="${item.id}">Reveal</button>
+          <button class="btn-outline btn-sm" data-vault-edit="${item.id}">Edit</button>
+          <button class="btn-danger btn-sm" data-vault-del="${item.id}">Delete</button>
+        </div>
+      `;
+    }
+
+    card.innerHTML = innerHtml;
+    grid.appendChild(card);
+  });
+
+  // Bind dynamic card actions
+  grid.querySelectorAll("[data-vault-type]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.vaultId;
+      const action = btn.dataset.vaultType;
+      await typeVaultEntry(id, action);
+    });
+  });
+
+  grid.querySelectorAll("[data-vault-copy]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      copyTextToClipboard(btn.dataset.vaultCode, "2FA OTP code copied.");
+    });
+  });
+
+  grid.querySelectorAll("[data-vault-reveal]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.vaultReveal;
+      const item = vaultEntries.find((e) => e.id === id);
+      const span = qs(`pass-text-${id}`);
+      if (item && span) {
+        if (span.textContent === "••••••••••••") {
+          span.textContent = item.pass;
+          btn.textContent = "Hide";
+        } else {
+          span.textContent = "••••••••••••";
+          btn.textContent = "Reveal";
+        }
+      }
+    });
+  });
+
+  grid.querySelectorAll("[data-vault-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.vaultEdit;
+      const item = vaultEntries.find((e) => e.id === id);
+      if (item) openVaultModal(item);
+    });
+  });
+
+  grid.querySelectorAll("[data-vault-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.vaultDel;
+      if (confirm("Delete this vault item?")) {
+        await deleteVaultEntry(id);
+      }
+    });
+  });
+}
+
+function startVaultTicker() {
+  if (vaultTickerTimer) clearInterval(vaultTickerTimer);
+
+  vaultTickerTimer = setInterval(() => {
+    if (activeTab !== "vault" || !vaultStatus.unlocked) return;
+
+    if (vaultStatus.lock_timeout_sec > 0) {
+      vaultStatus.lock_timeout_sec--;
+      const min = Math.floor(vaultStatus.lock_timeout_sec / 60);
+      const sec = String(vaultStatus.lock_timeout_sec % 60).padStart(2, "0");
+      const badge = qs("vault-autolock-badge");
+      if (badge) badge.textContent = `Unlocked (${min}:${sec})`;
+
+      if (vaultStatus.lock_timeout_sec <= 0) {
+        refreshVaultView();
+      }
+    }
+
+    let needRefresh = false;
+    vaultEntries.forEach((item) => {
+      if (item.type === "totp" && typeof item.remaining === "number") {
+        item.remaining--;
+        const timerSpan = qs(`otp-timer-${item.id}`);
+        if (timerSpan) timerSpan.textContent = `${item.remaining}s`;
+        if (item.remaining <= 0) needRefresh = true;
+      }
+    });
+
+    if (needRefresh) {
+      loadVaultEntries();
+    }
+  }, 1000);
+}
+
+async function typeVaultEntry(id, action) {
+  try {
+    setText("vault-action-status", "Typing via USB HID...");
+    const res = await api("/api/vault/type", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action, enter: true }),
+    });
+    if (!res.ok) throw new Error();
+    setText("vault-action-status", "Typed successfully via USB HID.");
+  } catch (_) {
+    setText("vault-action-status", "Failed to type entry.");
+  }
+}
+
+async function deleteVaultEntry(id) {
+  try {
+    const res = await api("/api/vault/entry/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    if (!res.ok) throw new Error();
+    await loadVaultEntries();
+    setText("vault-action-status", "Item deleted.");
+  } catch (_) {
+    setText("vault-action-status", "Failed to delete item.");
+  }
+}
+
+function openVaultModal(item = null) {
+  const modal = qs("vault-modal");
+  if (!modal) return;
+
+  qs("vault-item-id").value = item ? item.id : "";
+  qs("vault-item-type").value = item ? (item.type || "totp") : "totp";
+  qs("vault-item-label").value = item ? (item.label || "") : "";
+  qs("vault-item-secret").value = item ? (item.secret || "") : "";
+  qs("vault-item-digits").value = item ? String(item.digits || 6) : "6";
+  qs("vault-item-period").value = item ? String(item.period || 30) : "30";
+  qs("vault-item-user").value = item ? (item.user || "") : "";
+  qs("vault-item-pass").value = item ? (item.pass || "") : "";
+  qs("vault-item-notes").value = item ? (item.notes || "") : "";
+  qs("vault-modal-title").textContent = item ? "Edit Vault Entry" : "Add Vault Entry";
+
+  syncVaultModalFields();
+  modal.classList.remove("hidden");
+}
+
+function closeVaultModal() {
+  qs("vault-modal")?.classList.add("hidden");
+}
+
+function syncVaultModalFields() {
+  const type = qs("vault-item-type")?.value || "totp";
+  if (type === "totp") {
+    qs("vault-totp-fields")?.classList.remove("hidden");
+    qs("vault-pass-fields")?.classList.add("hidden");
+  } else {
+    qs("vault-totp-fields")?.classList.add("hidden");
+    qs("vault-pass-fields")?.classList.remove("hidden");
+  }
+}
+
+function bindVaultEvents() {
+  qs("vault-setup-btn")?.addEventListener("click", async () => {
+    const p1 = qs("vault-setup-pass")?.value || "";
+    const p2 = qs("vault-setup-pass-confirm")?.value || "";
+    if (p1.length < 6) {
+      setText("vault-setup-status", "Password must be at least 6 characters.");
+      return;
+    }
+    if (p1 !== p2) {
+      setText("vault-setup-status", "Passwords do not match.");
+      return;
+    }
+    try {
+      setText("vault-setup-status", "Initializing encrypted vault...");
+      const res = await api("/api/vault/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: p1 }),
+      });
+      if (!res.ok) throw new Error();
+      await refreshVaultView();
+    } catch (_) {
+      setText("vault-setup-status", "Failed to setup vault.");
+    }
+  });
+
+  qs("vault-unlock-btn")?.addEventListener("click", async () => {
+    const pass = qs("vault-unlock-pass")?.value || "";
+    if (!pass) return;
+    try {
+      setText("vault-lock-status", "Decrypting vault in RAM...");
+      const res = await api("/api/vault/unlock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pass, epoch: Math.floor(Date.now() / 1000) }),
+      });
+      if (!res.ok) {
+        setText("vault-lock-status", "Incorrect Master Password.");
+        return;
+      }
+      qs("vault-unlock-pass").value = "";
+      await refreshVaultView();
+    } catch (_) {
+      setText("vault-lock-status", "Network error while unlocking.");
+    }
+  });
+
+  qs("vault-lock-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/vault/lock", { method: "POST" });
+      refreshVaultView();
+    } catch (_) {}
+  });
+
+  qs("vault-search-input")?.addEventListener("input", renderVaultEntries);
+  qs("vault-add-item-btn")?.addEventListener("click", () => openVaultModal(null));
+  qs("vault-modal-close")?.addEventListener("click", closeVaultModal);
+  qs("vault-modal-cancel")?.addEventListener("click", closeVaultModal);
+  qs("vault-item-type")?.addEventListener("change", syncVaultModalFields);
+
+  qs("vault-gen-pass-btn")?.addEventListener("click", () => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*";
+    let pass = "";
+    for (let i = 0; i < 20; i++) {
+      pass += chars[Math.floor(Math.random() * chars.length)];
+    }
+    if (qs("vault-item-pass")) qs("vault-item-pass").value = pass;
+  });
+
+  qs("vault-modal-save")?.addEventListener("click", async () => {
+    const type = qs("vault-item-type").value;
+    const label = qs("vault-item-label").value.trim();
+    if (!label) {
+      alert("Please enter a service / account label.");
+      return;
+    }
+
+    const payload = {
+      id: qs("vault-item-id").value || "",
+      type: type,
+      label: label,
+      notes: qs("vault-item-notes").value.trim(),
+    };
+
+    if (type === "totp") {
+      const secret = qs("vault-item-secret").value.trim().replace(/\s+/g, "").toUpperCase();
+      if (!secret) {
+        alert("Please enter a Base32 2FA secret key.");
+        return;
+      }
+      payload.secret = secret;
+      payload.digits = Number(qs("vault-item-digits").value || 6);
+      payload.period = Number(qs("vault-item-period").value || 30);
+    } else {
+      payload.user = qs("vault-item-user").value.trim();
+      payload.pass = qs("vault-item-pass").value;
+    }
+
+    try {
+      const res = await api("/api/vault/entry/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error();
+      closeVaultModal();
+      await loadVaultEntries();
+    } catch (_) {
+      alert("Failed to save entry.");
+    }
+  });
+}
+
 function setupTabs() {
   const buttons = Array.from(document.querySelectorAll(".tab-btn"));
   const views = Array.from(document.querySelectorAll(".view"));
@@ -2714,6 +3103,8 @@ function setupTabs() {
     } else if (tab === "kvm") {
       loadKvmStatus();
       loadActionFiles();
+    } else if (tab === "vault") {
+      refreshVaultView();
     }
   }
 
@@ -2882,6 +3273,7 @@ function initEvents() {
     if (host) window.open(host, "_blank");
   });
 
+  bindVaultEvents();
   updateKvmHelperPanel();
 }
 
@@ -2908,6 +3300,7 @@ async function bootstrap() {
   await refreshStatus();
   await loadKvmStatus();
   await loadActionFiles();
+  await refreshVaultView();
   syncScreenshotAutoRefresh();
 
   statusPollTimer = setInterval(() => {
