@@ -1417,7 +1417,7 @@ void loadSettings() {
         if (usbVendorName.length() > 48) usbVendorName = usbVendorName.substring(0, 48);
         if (usbProductName.length() > 48) usbProductName = usbProductName.substring(0, 48);
 
-        typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
+        typeDelay = clampInt(doc["delay"] | typeDelay, 0, 200);
         burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
         burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
         lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
@@ -1542,7 +1542,7 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &w
     if (!lbl.isEmpty() && lbl.length() <= 11) usbMscVolumeLabel = lbl;
   }
 
-  typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
+  typeDelay = clampInt(doc["delay"] | typeDelay, 0, 200);
   burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
   lineDelayMs = clampInt(doc["line_delay"] | lineDelayMs, 0, 250);
@@ -1712,7 +1712,7 @@ void typeTextInternal(size_t startIndex, size_t length) {
     safeLength = BUFFER_SIZE - startIndex;
   }
 
-  int charDelay = clampInt(typeDelay, 0, 40);
+  int charDelay = clampInt(typeDelay, 0, 200);
   int batchSize = clampInt(burstChars, 6, 96);
   int batchPause = clampInt(burstPauseMs, 0, 120);
   int newlinePause = clampInt(lineDelayMs, 0, 250);

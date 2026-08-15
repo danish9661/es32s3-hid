@@ -541,13 +541,32 @@
           </div>
 
           <h3 style="margin-top:16px;">Typing Engine Tuning</h3>
+
+          <!-- Speed Presets -->
+          <div class="speed-preset-bar">
+            <span class="label" style="margin-bottom:0;align-self:center;">Presets:</span>
+            <button id="preset-ultrafast" class="speed-preset-btn preset-ultrafast" title="Injects at raw USB bus speed. May drop characters on Windows/macOS – use on Linux or fast VMs.">
+              ⚡ Ultra Fast
+            </button>
+            <button id="preset-fast" class="speed-preset-btn preset-fast" title="Reliable max speed for most modern PCs. Good starting point.">
+              🚀 Fast
+            </button>
+            <button id="preset-balanced" class="speed-preset-btn preset-balanced" title="Default balanced setting. Safe for most targets including slower machines.">
+              ⚖️ Balanced
+            </button>
+            <button id="preset-human" class="speed-preset-btn preset-human" title="Mimics realistic human typing (~60-80 WPM). Evades basic HID anomaly detection and works on all OS and apps.">
+              🧑 Human
+            </button>
+            <div class="preset-os-note" id="preset-os-note"></div>
+          </div>
+
           <div class="slider-grid">
             <div class="slider-item">
               <div class="label-row">
                 <label class="label" for="typing-delay">Typing Delay (ms)</label>
                 <button class="help-icon" data-help-key="typing-delay">?</button>
               </div>
-              <input id="typing-delay" type="range" min="0" max="40" step="1">
+              <input id="typing-delay" type="range" min="0" max="200" step="1">
               <div id="typing-delay-value" class="slider-value">0 ms</div>
             </div>
 
@@ -586,6 +605,7 @@
               <div id="kvm-mouse-smooth-value" class="slider-value">100%</div>
             </div>
           </div>
+
 
           <div style="margin-top:12px; max-width:340px;">
             <label class="label" for="led-bright">LED Brightness</label>

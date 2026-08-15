@@ -68,25 +68,77 @@ const keyNameMap = {
 const tuningHelp = {
   "typing-delay": {
     title: "Typing Delay",
-    body: "Delay between each typed character. Increase this if characters are missing on slower target PCs. Decrease this to type faster.",
-    best: "Best start: 2-6 ms. Use 5 ms for maximum reliability.",
+    body: "Delay between each typed character. At 0 ms you hit the raw USB polling limit (~500–1000 chars/sec). Increase if characters are missing on the target system.",
+    best: "Ultra Fast: 0 ms · Fast: 2 ms · Balanced: 6 ms · Human: 80 ms.",
   },
   "burst-chars": {
     title: "Burst Characters",
-    body: "Number of characters sent in one burst before a short pause. Higher value increases speed but can overflow input buffers on some systems.",
-    best: "Best start: 20-30. Use 24 as a safe balanced value.",
+    body: "Characters sent per burst before a short breather pause. Higher = more throughput but risks overflowing the target's input buffer, especially on macOS and in some GUI apps.",
+    best: "Ultra Fast: 96 · Fast: 48 · Balanced: 24 · Human: 8.",
   },
   "burst-pause": {
     title: "Burst Pause",
-    body: "Pause after each burst of characters. Increase this first when seeing dropped characters. Decrease this for more throughput.",
-    best: "Best start: 8-14 ms. Use 10 ms for balanced speed and stability.",
+    body: "Pause inserted after each burst of characters. Increase this first when you see dropped chars. macOS needs at least 20 ms at max burst; Windows can usually handle 8 ms.",
+    best: "Ultra Fast: 0 ms · Fast: 5 ms · Balanced: 10 ms · Human: 50 ms.",
   },
   "line-delay": {
     title: "Newline Pause",
-    body: "Extra delay after Enter/newline. Helpful for command shells, editors, and form fields that need time to process each line.",
-    best: "Best start: 30-60 ms. Use 40 ms for general use.",
+    body: "Extra pause after every Enter / newline. Critical for CLI shells, Python REPLs, and dialog boxes that need time to process each command line.",
+    best: "Ultra Fast: 0 ms · Fast: 10 ms · Balanced: 40 ms · Human: 220 ms.",
   },
 };
+
+// --- TYPING SPEED PRESETS ---
+// OS-level notes (shown in UI when a preset is selected)
+const SPEED_PRESETS = {
+  ultrafast: {
+    delay: 0, burst: 96, burstPause: 0, lineDelay: 0,
+    osNote: "⚠️ Ultra Fast: Hits raw USB polling limits (~1 ms/char). " +
+      "Linux (X11/Wayland terminals) handles this fine. " +
+      "Windows may silently drop characters in slow apps (Notepad, some IDEs) — increase Burst Pause to 5 ms if this happens. " +
+      "macOS is most sensitive; Cocoa apps may drop chars if burst pause < 15 ms.",
+  },
+  fast: {
+    delay: 2, burst: 48, burstPause: 5, lineDelay: 10,
+    osNote: "🚀 Fast: Reliable on most modern Windows 10/11 and Linux. " +
+      "For macOS, increase Burst Pause to 15 ms if you see missing chars in Terminal.",
+  },
+  balanced: {
+    delay: 6, burst: 24, burstPause: 10, lineDelay: 40,
+    osNote: "⚖️ Balanced (Default): Safe across Windows, Linux, and macOS for most apps and shells.",
+  },
+  human: {
+    delay: 80, burst: 8, burstPause: 50, lineDelay: 220,
+    osNote: "🧑 Human (~70 WPM): Indistinguishable from real typing on all OS types. " +
+      "Works on every app including locked-down terminals, kiosks, and remote desktops that rate-limit input.",
+  },
+};
+
+function applySpeedPreset(name) {
+  const p = SPEED_PRESETS[name];
+  if (!p) return;
+  const setSlider = (id, val) => {
+    const el = qs(id);
+    if (el) { el.value = val; el.dispatchEvent(new Event("input")); }
+  };
+  setSlider("typing-delay", p.delay);
+  setSlider("burst-chars",  p.burst);
+  setSlider("burst-pause",  p.burstPause);
+  setSlider("line-delay",   p.lineDelay);
+
+  const note = qs("preset-os-note");
+  if (note) {
+    note.textContent = p.osNote;
+    note.classList.add("visible");
+  }
+}
+
+function bindSpeedPresets() {
+  ["ultrafast", "fast", "balanced", "human"].forEach(name => {
+    const btn = qs(`preset-${name}`);
+    if (btn) btn.addEventListener("click", () => applySpeedPreset(name));
+  });
+}
 
 const keyboardLayout = [
   [
@@ -3247,6 +3299,7 @@ function initEvents() {
   bindSliderReadout("burst-pause", " ms");
   bindSliderReadout("line-delay", " ms");
   bindSliderReadout("kvm-mouse-smooth", "%");
+  bindSpeedPresets();
 
   qs("usb-msc-enabled")?.addEventListener("change", (e) => {
     const mscBadge = qs("usb-msc-status-badge");
