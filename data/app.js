@@ -596,8 +596,17 @@ function downloadTextFile(filename, content, mimeType = "text/plain") {
   a.href = url;
   a.download = filename;
   a.click();
-
   URL.revokeObjectURL(url);
+}
+
+function escapeHtml(str) {
+  if (str == null) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 async function copyTextToClipboard(text, successLabel = "Copied.") {
