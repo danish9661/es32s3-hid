@@ -431,7 +431,32 @@ select.input {
   min-height: 20px;
   color: var(--muted);
   font-size: 12px;
+  transition: all 0.2s ease;
 }
+
+.status-line.error {
+  color: #fb7185 !important;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.status-line.ok {
+  color: #34d399 !important;
+  font-weight: 600;
+}
+
+@keyframes inputErrorShake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+
+.input-error {
+  animation: inputErrorShake 0.35s ease;
+  border-color: rgba(244, 63, 94, 0.7) !important;
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.3) !important;
+}
+
 
 /* Script Execution Progress Bar */
 .script-progress-box {

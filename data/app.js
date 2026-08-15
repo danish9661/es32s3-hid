@@ -540,7 +540,17 @@ function qs(id) {
 
 function setText(id, text) {
   const el = qs(id);
-  if (el) el.textContent = text;
+  if (el) {
+    el.textContent = text;
+    el.className = "status-line";
+  }
+}
+
+function setStatusMsg(id, text, type = "") {
+  const el = qs(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = "status-line" + (type ? " " + type : "");
 }
 
 function clampNumber(value, min, max) {
@@ -3116,24 +3126,40 @@ function bindVaultEvents() {
   });
 
   qs("vault-unlock-btn")?.addEventListener("click", async () => {
-    const pass = qs("vault-unlock-pass")?.value || "";
-    if (!pass) return;
+    const passInput = qs("vault-unlock-pass");
+    const pass = passInput?.value || "";
+    if (!pass) {
+      setStatusMsg("vault-lock-status", "Please enter your Master Password.", "error");
+      passInput?.focus();
+      return;
+    }
     try {
-      setText("vault-lock-status", "Decrypting vault in RAM...");
+      setStatusMsg("vault-lock-status", "Decrypting vault in RAM...");
       const res = await api("/api/vault/unlock", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: pass, epoch: Math.floor(Date.now() / 1000) }),
       });
       if (!res.ok) {
-        setText("vault-lock-status", "Incorrect Master Password.");
+        setStatusMsg("vault-lock-status", "⚠️ Incorrect Master Password. Please try again.", "error");
+        passInput?.classList.remove("input-error");
+        void passInput?.offsetWidth;
+        passInput?.classList.add("input-error");
+        passInput?.focus();
+        passInput?.select();
         return;
       }
-      qs("vault-unlock-pass").value = "";
-      setText("vault-lock-status", "");
+      passInput.value = "";
+      passInput.classList.remove("input-error");
+      setStatusMsg("vault-lock-status", "");
       await refreshVaultView();
     } catch (_) {
-      setText("vault-lock-status", "Incorrect Master Password.");
+      setStatusMsg("vault-lock-status", "⚠️ Incorrect Master Password. Please try again.", "error");
+      passInput?.classList.remove("input-error");
+      void passInput?.offsetWidth;
+      passInput?.classList.add("input-error");
+      passInput?.focus();
+      passInput?.select();
     }
   });
 
