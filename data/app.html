@@ -542,23 +542,20 @@
 
           <h3 style="margin-top:16px;">Typing Engine Tuning</h3>
 
-          <!-- Speed Presets -->
-          <div class="speed-preset-bar">
-            <span class="label" style="margin-bottom:0;align-self:center;">Presets:</span>
-            <button id="preset-ultrafast" class="speed-preset-btn preset-ultrafast" title="Injects at raw USB bus speed. May drop characters on Windows/macOS – use on Linux or fast VMs.">
-              ⚡ Ultra Fast
-            </button>
-            <button id="preset-fast" class="speed-preset-btn preset-fast" title="Reliable max speed for most modern PCs. Good starting point.">
-              🚀 Fast
-            </button>
-            <button id="preset-balanced" class="speed-preset-btn preset-balanced" title="Default balanced setting. Safe for most targets including slower machines.">
-              ⚖️ Balanced
-            </button>
-            <button id="preset-human" class="speed-preset-btn preset-human" title="Mimics realistic human typing (~60-80 WPM). Evades basic HID anomaly detection and works on all OS and apps.">
-              🧑 Human
-            </button>
-            <div class="preset-os-note" id="preset-os-note"></div>
+          <!-- Speed Preset Segmented Control -->
+          <div class="speed-seg-wrap">
+            <div class="speed-seg-track" id="speed-seg-track">
+              <div class="speed-seg-indicator" id="speed-seg-indicator"></div>
+              <button class="speed-seg-btn" data-preset="ultrafast" id="seg-ultrafast">Ultra Fast</button>
+              <button class="speed-seg-btn" data-preset="fast"      id="seg-fast">Fast</button>
+              <button class="speed-seg-btn" data-preset="balanced"  id="seg-balanced">Balanced</button>
+              <button class="speed-seg-btn" data-preset="human"     id="seg-human">Human</button>
+              <button class="speed-seg-btn seg-custom" data-preset="custom" id="seg-custom">Custom</button>
+            </div>
           </div>
+          <div class="preset-os-note" id="preset-os-note"></div>
+
+
 
           <div class="slider-grid">
             <div class="slider-item">

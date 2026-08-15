@@ -88,35 +88,53 @@ const tuningHelp = {
   },
 };
 
-// --- TYPING SPEED PRESETS ---
-// OS-level notes (shown in UI when a preset is selected)
+// Segment order (matches grid-template-columns order in HTML)
+const SEG_ORDER = ["ultrafast", "fast", "balanced", "human", "custom"];
+
 const SPEED_PRESETS = {
-  ultrafast: {
-    delay: 0, burst: 96, burstPause: 0, lineDelay: 0,
-    osNote: "⚠️ Ultra Fast: Hits raw USB polling limits (~1 ms/char). " +
-      "Linux (X11/Wayland terminals) handles this fine. " +
-      "Windows may silently drop characters in slow apps (Notepad, some IDEs) — increase Burst Pause to 5 ms if this happens. " +
-      "macOS is most sensitive; Cocoa apps may drop chars if burst pause < 15 ms.",
-  },
-  fast: {
-    delay: 2, burst: 48, burstPause: 5, lineDelay: 10,
-    osNote: "🚀 Fast: Reliable on most modern Windows 10/11 and Linux. " +
-      "For macOS, increase Burst Pause to 15 ms if you see missing chars in Terminal.",
-  },
-  balanced: {
-    delay: 6, burst: 24, burstPause: 10, lineDelay: 40,
-    osNote: "⚖️ Balanced (Default): Safe across Windows, Linux, and macOS for most apps and shells.",
-  },
-  human: {
-    delay: 80, burst: 8, burstPause: 50, lineDelay: 220,
-    osNote: "🧑 Human (~70 WPM): Indistinguishable from real typing on all OS types. " +
-      "Works on every app including locked-down terminals, kiosks, and remote desktops that rate-limit input.",
-  },
+  ultrafast: { delay: 0,  burst: 96, burstPause: 0,  lineDelay: 0 },
+  fast:      { delay: 2,  burst: 48, burstPause: 5,  lineDelay: 10 },
+  balanced:  { delay: 6,  burst: 24, burstPause: 10, lineDelay: 40 },
+  human:     { delay: 80, burst: 8,  burstPause: 50, lineDelay: 220 },
 };
+
+const PRESET_OS_NOTES = {
+  ultrafast: "Ultra Fast: Hits raw USB polling limits. Linux handles this well. Windows may drop chars in slow apps (increase Burst Pause to 5 ms). macOS needs Burst Pause >= 15 ms.",
+  fast:      "Fast: Reliable on modern Windows 10/11 and Linux. For macOS increase Burst Pause to 15 ms if you see missing characters.",
+  balanced:  "Balanced (Default): Safe across Windows, Linux, and macOS for most apps and shells.",
+  human:     "Human (~70 WPM): Indistinguishable from real typing on all OS types. Works on kiosks, locked-down terminals, and rate-limited remote desktops.",
+  custom:    "Custom: Values set manually. Sliders reflect current live configuration.",
+};
+
+let _suppressCustomSwitch = false;
+
+function setPresetSegment(name) {
+  const track = qs("speed-seg-track");
+  const indicator = qs("speed-seg-indicator");
+  if (!track || !indicator) return;
+
+  track.setAttribute("data-active", name);
+
+  // Position indicator over the correct segment
+  const idx = SEG_ORDER.indexOf(name);
+  const segW = 100 / SEG_ORDER.length;
+  const trackPad = 4; // px padding inside track
+  indicator.style.left  = `calc(${idx * segW}% + ${trackPad}px)`;
+  indicator.style.width = `calc(${segW}% - ${trackPad * 2 / SEG_ORDER.length}px - ${trackPad}px)`;
+
+  // Update OS note
+  const note = qs("preset-os-note");
+  if (note) {
+    note.textContent = PRESET_OS_NOTES[name] || "";
+    note.classList.toggle("visible", !!PRESET_OS_NOTES[name]);
+  }
+}
 
 function applySpeedPreset(name) {
   const p = SPEED_PRESETS[name];
   if (!p) return;
+
+  _suppressCustomSwitch = true;
   const setSlider = (id, val) => {
     const el = qs(id);
     if (el) { el.value = val; el.dispatchEvent(new Event("input")); }
@@ -125,19 +143,35 @@ function applySpeedPreset(name) {
   setSlider("burst-chars",  p.burst);
   setSlider("burst-pause",  p.burstPause);
   setSlider("line-delay",   p.lineDelay);
+  _suppressCustomSwitch = false;
 
-  const note = qs("preset-os-note");
-  if (note) {
-    note.textContent = p.osNote;
-    note.classList.add("visible");
-  }
+  setPresetSegment(name);
 }
 
 function bindSpeedPresets() {
-  ["ultrafast", "fast", "balanced", "human"].forEach(name => {
-    const btn = qs(`preset-${name}`);
-    if (btn) btn.addEventListener("click", () => applySpeedPreset(name));
+  // Click on any segment button
+  SEG_ORDER.forEach(name => {
+    const btn = qs(`seg-${name}`);
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      if (name === "custom") {
+        setPresetSegment("custom"); // just highlight, don't change sliders
+      } else {
+        applySpeedPreset(name);
+      }
+    });
   });
+
+  // Any manual slider touch → switch to Custom
+  ["typing-delay", "burst-chars", "burst-pause", "line-delay"].forEach(id => {
+    const el = qs(id);
+    if (el) el.addEventListener("input", () => {
+      if (!_suppressCustomSwitch) setPresetSegment("custom");
+    });
+  });
+
+  // Default to Balanced on first paint
+  setPresetSegment("balanced");
 }
 
 const keyboardLayout = [

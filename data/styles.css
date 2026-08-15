@@ -1218,84 +1218,104 @@ select.input {
   }
 }
 
-.speed-preset-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
+/* Segmented speed preset control */
+.speed-seg-wrap {
+  margin-bottom: 12px;
 }
 
-.speed-preset-btn {
-  padding: 7px 14px;
-  border-radius: 999px;
-  font-size: 0.82rem;
-  font-weight: 600;
+.speed-seg-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  background: rgba(0, 0, 0, 0.35);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text);
-  cursor: pointer;
-  transition: all 0.15s ease;
+  border-radius: 10px;
+  padding: 4px;
+  overflow: hidden;
 }
 
-.speed-preset-btn:hover {
-  transform: translateY(-1px);
+.speed-seg-indicator {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  transition: left 0.28s cubic-bezier(0.34, 1.2, 0.64, 1),
+              width 0.28s cubic-bezier(0.34, 1.2, 0.64, 1),
+              background 0.2s ease, box-shadow 0.2s ease;
+  pointer-events: none;
+  z-index: 0;
+  left: 4px;
+  width: calc(20% - 4px);
 }
 
-.preset-ultrafast {
-  border-color: rgba(244, 63, 94, 0.4);
-  color: #fb7185;
-  background: rgba(244, 63, 94, 0.1);
-}
-.preset-ultrafast:hover {
+.speed-seg-track[data-active="ultrafast"] .speed-seg-indicator {
   background: rgba(244, 63, 94, 0.2);
-  box-shadow: 0 0 14px rgba(244, 63, 94, 0.3);
+  border-color: rgba(244, 63, 94, 0.5);
+  box-shadow: 0 0 16px rgba(244, 63, 94, 0.3);
+}
+.speed-seg-track[data-active="fast"] .speed-seg-indicator {
+  background: rgba(255, 138, 43, 0.18);
+  border-color: rgba(255, 138, 43, 0.5);
+  box-shadow: 0 0 16px rgba(255, 138, 43, 0.28);
+}
+.speed-seg-track[data-active="balanced"] .speed-seg-indicator {
+  background: rgba(0, 240, 255, 0.1);
+  border-color: rgba(0, 240, 255, 0.4);
+  box-shadow: 0 0 16px rgba(0, 240, 255, 0.2);
+}
+.speed-seg-track[data-active="human"] .speed-seg-indicator {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.45);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.22);
+}
+.speed-seg-track[data-active="custom"] .speed-seg-indicator {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.3);
+  box-shadow: 0 0 10px rgba(148, 163, 184, 0.12);
 }
 
-.preset-fast {
-  border-color: rgba(255, 138, 43, 0.4);
-  color: var(--accent-2);
-  background: rgba(255, 138, 43, 0.1);
-}
-.preset-fast:hover {
-  background: rgba(255, 138, 43, 0.2);
-  box-shadow: 0 0 14px rgba(255, 138, 43, 0.3);
-}
-
-.preset-balanced {
-  border-color: rgba(0, 240, 255, 0.3);
-  color: var(--accent-cyan);
-  background: rgba(0, 240, 255, 0.07);
-}
-.preset-balanced:hover {
-  background: rgba(0, 240, 255, 0.14);
-  box-shadow: 0 0 14px rgba(0, 240, 255, 0.2);
+.speed-seg-btn {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 9px 4px;
+  cursor: pointer;
+  border-radius: 7px;
+  transition: color 0.18s ease;
+  white-space: nowrap;
+  text-align: center;
+  letter-spacing: 0.01em;
 }
 
-.preset-human {
-  border-color: rgba(16, 185, 129, 0.4);
-  color: #34d399;
-  background: rgba(16, 185, 129, 0.08);
-}
-.preset-human:hover {
-  background: rgba(16, 185, 129, 0.16);
-  box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
-}
+.speed-seg-btn:hover { color: var(--text); }
+
+.speed-seg-track[data-active="ultrafast"] #seg-ultrafast { color: #fb7185; }
+.speed-seg-track[data-active="fast"]      #seg-fast      { color: var(--accent-2); }
+.speed-seg-track[data-active="balanced"]  #seg-balanced  { color: var(--accent-cyan); }
+.speed-seg-track[data-active="human"]     #seg-human     { color: #34d399; }
+.speed-seg-track[data-active="custom"]    #seg-custom    { color: var(--text); }
+
+.seg-custom { border-left: 1px solid var(--line); }
 
 .preset-os-note {
   font-size: 11px;
   color: var(--muted);
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line);
-  max-width: 100%;
-  flex-basis: 100%;
+  margin-bottom: 12px;
   display: none;
+  line-height: 1.5;
 }
-.preset-os-note.visible {
-  display: block;
-}
+.preset-os-note.visible { display: block; }
+
 
 /* Slider Grid */
 .slider-grid {
