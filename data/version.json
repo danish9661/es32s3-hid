@@ -1,0 +1,6 @@
+{
+  "version": "2.4.0",
+  "build_date": "2026-08-15 14:45",
+  "chip": "ESP32-S3",
+  "type": "LittleFS Web UI"
+}

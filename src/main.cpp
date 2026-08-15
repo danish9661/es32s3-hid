@@ -21,6 +21,8 @@
 #include "mbedtls/pkcs5.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/md.h"
+#include <esp_ota_ops.h>
+#include <esp_app_format.h>
 #include <cstring>
 #include <time.h>
 #include <sys/time.h>
@@ -4003,8 +4005,32 @@ void registerRoutes() {
     doc["bright"] = ledBrightness;
     doc["kvm_mouse_smooth"] = kvmMouseSmoothness;
 
-    doc["fw_version"] = FIRMWARE_VERSION;
-    doc["build_date"] = BUILD_DATE;
+    const esp_app_desc_t *app_desc = esp_ota_get_app_description();
+    if (app_desc) {
+      doc["fw_version"] = app_desc->version;
+      doc["build_date"] = String(app_desc->date) + " " + String(app_desc->time);
+      doc["idf_version"] = app_desc->idf_ver;
+      doc["project_name"] = app_desc->project_name;
+    } else {
+      doc["fw_version"] = FIRMWARE_VERSION;
+      doc["build_date"] = BUILD_DATE;
+    }
+
+    // Read UI version from /version.json in LittleFS
+    if (LittleFS.exists("/version.json")) {
+      File vFile = LittleFS.open("/version.json", "r");
+      if (vFile) {
+        DynamicJsonDocument vDoc(512);
+        if (deserializeJson(vDoc, vFile) == DeserializationError::Ok) {
+          doc["ui_version"] = vDoc["version"].as<String>();
+          doc["ui_build_date"] = vDoc["build_date"] | BUILD_DATE;
+        }
+        vFile.close();
+      }
+    }
+    if (!doc.containsKey("ui_version")) {
+      doc["ui_version"] = "2.4.0";
+    }
 
     String json;
     serializeJson(doc, json);

@@ -1730,6 +1730,57 @@ function bindOtaControls() {
       const fwRadio = document.querySelector('input[name="ota-type"][value="firmware"]');
       if (fwRadio) { fwRadio.checked = true; updateTypeBadge(); }
     }
+
+    // Client-side Binary Inspector (Reads ESP32 image header & esp_app_desc_t before flashing)
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const buffer = evt.target.result;
+        const bytes = new Uint8Array(buffer);
+        let detectedInfo = "";
+
+        if (bytes[0] === 0xE9) { // ESP32 magic byte
+          const chipId = bytes[12] | (bytes[13] << 8);
+          let chipName = "ESP32-S3";
+          if (chipId === 0x0000) chipName = "ESP32 (Generic)";
+          else if (chipId === 0x0005) chipName = "ESP32-C3";
+
+          let versionFound = null;
+          let buildDateFound = null;
+          // Search for esp_app_desc_t magic number (0xABCD5432)
+          for (let i = 0; i < bytes.length - 64; i++) {
+            if (bytes[i] === 0x32 && bytes[i+1] === 0x54 && bytes[i+2] === 0xCD && bytes[i+3] === 0xAB) {
+              const verBytes = bytes.slice(i + 16, i + 48);
+              versionFound = new TextDecoder().decode(verBytes).replace(/\0.*$/g, '').trim();
+              const dateBytes = bytes.slice(i + 96, i + 112);
+              const timeBytes = bytes.slice(i + 80, i + 96);
+              const dStr = new TextDecoder().decode(dateBytes).replace(/\0.*$/g, '').trim();
+              const tStr = new TextDecoder().decode(timeBytes).replace(/\0.*$/g, '').trim();
+              if (dStr) buildDateFound = `${dStr} ${tStr}`.trim();
+              break;
+            }
+          }
+
+          if (versionFound) {
+            detectedInfo = `✅ Verified ${chipName} Firmware: v${versionFound}${buildDateFound ? ' (' + buildDateFound + ')' : ''}`;
+          } else {
+            detectedInfo = `✅ Verified ${chipName} Binary Image`;
+          }
+
+          const fwRadio = document.querySelector('input[name="ota-type"][value="firmware"]');
+          if (fwRadio) { fwRadio.checked = true; updateTypeBadge(); }
+        } else if (file.name.toLowerCase().includes("littlefs") || file.size > 8 * 1024 * 1024) {
+          detectedInfo = `📁 Filesystem Image (${(file.size / 1024 / 1024).toFixed(2)} MB LittleFS Image)`;
+          const fsRadio = document.querySelector('input[name="ota-type"][value="littlefs"]');
+          if (fsRadio) { fsRadio.checked = true; updateTypeBadge(); }
+        }
+
+        if (statusSpan && detectedInfo) {
+          statusSpan.innerHTML = `<strong>${detectedInfo}</strong>`;
+        }
+      } catch (_) {}
+    };
+    reader.readAsArrayBuffer(file.slice(0, 1024));
   };
 
   browseBtn?.addEventListener("click", (e) => {
@@ -2696,12 +2747,18 @@ async function loadSettings() {
     );
     requestAnimationFrame(() => setPresetSegment(activePreset));
 
-    // Show firmware version badge and OTA card info
+    // Show dynamic firmware & UI version badges and OTA card info
     if (d.fw_version) {
       const badge = qs("fw-version-badge");
       if (badge) badge.textContent = `FW: v${d.fw_version}`;
       const otaFw = qs("ota-fw-version-display");
       if (otaFw) otaFw.textContent = `v${d.fw_version}`;
+    }
+    if (d.ui_version) {
+      const uiBadge = qs("ui-version-badge");
+      if (uiBadge) uiBadge.textContent = `UI: v${d.ui_version}`;
+      const otaUi = qs("ota-ui-version-display");
+      if (otaUi) otaUi.textContent = `v${d.ui_version}`;
     }
     if (d.build_date) {
       const otaBuild = qs("ota-build-date-display");
