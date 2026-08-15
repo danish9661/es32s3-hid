@@ -3095,13 +3095,20 @@ function bindVaultEvents() {
       return;
     }
     try {
-      setText("vault-setup-status", "Initializing encrypted vault...");
+      setText("vault-setup-status", "Initializing encrypted vault (deriving AES-256 key)...");
       const res = await api("/api/vault/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: p1 }),
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setText("vault-setup-status", err.error || "Failed to setup vault.");
+        return;
+      }
+      qs("vault-setup-pass").value = "";
+      qs("vault-setup-pass-confirm").value = "";
+      setText("vault-setup-status", "");
       await refreshVaultView();
     } catch (_) {
       setText("vault-setup-status", "Failed to setup vault.");
@@ -3123,9 +3130,10 @@ function bindVaultEvents() {
         return;
       }
       qs("vault-unlock-pass").value = "";
+      setText("vault-lock-status", "");
       await refreshVaultView();
     } catch (_) {
-      setText("vault-lock-status", "Network error while unlocking.");
+      setText("vault-lock-status", "Incorrect Master Password.");
     }
   });
 

@@ -493,7 +493,7 @@ static constexpr size_t VAULT_KEY_LEN = 32;
 static constexpr uint32_t VAULT_PBKDF2_ITERATIONS = 10000;
 static constexpr uint32_t VAULT_AUTO_LOCK_MS = 300000;
 
-struct VaultHeader {
+struct __attribute__((packed)) VaultHeader {
   char magic[4];
   uint8_t salt[VAULT_SALT_LEN];
   uint8_t iv[VAULT_IV_LEN];
@@ -4118,7 +4118,7 @@ void registerRoutes() {
       if (unlockVaultWithPassword(pass, epoch)) {
         request->send(200, "application/json", "{\"ok\":true}");
       } else {
-        request->send(401, "application/json", "{\"error\":\"Incorrect Master Password\"}");
+        request->send(403, "application/json", "{\"error\":\"Incorrect Master Password\"}");
       }
     }
   );
