@@ -1304,178 +1304,188 @@ void typeTextInternal(size_t startIndex, size_t length) {
   scriptProgressPercent = 0;
 }
 
-String readLineRange(size_t lineStart, size_t lineEnd) {
-  String line;
-  if (!psramBuffer || lineEnd <= lineStart) return line;
+// --- ZERO-COPY DUCKY SCRIPT PARSER & FAST LOOKUP ENGINE ---
 
-  line.reserve(lineEnd - lineStart + 1);
-  for (size_t i = lineStart; i < lineEnd; i++) {
-    char c = psramBuffer[i];
-    if (c != '\r') line += c;
-  }
-  return line;
+struct DuckyKeyMapEntry {
+  const char *name;
+  uint8_t scancode;
+};
+
+static const DuckyKeyMapEntry FAST_DUCKY_KEYMAP[] = {
+  {"ENTER", KEY_RETURN},
+  {"RETURN", KEY_RETURN},
+  {"TAB", KEY_TAB},
+  {"ESC", KEY_ESC},
+  {"ESCAPE", KEY_ESC},
+  {"BACKSPACE", KEY_BACKSPACE},
+  {"BKSP", KEY_BACKSPACE},
+  {"DELETE", KEY_DELETE},
+  {"DEL", KEY_DELETE},
+  {"INSERT", KEY_INSERT},
+  {"INS", KEY_INSERT},
+  {"UP", KEY_UP_ARROW},
+  {"UPARROW", KEY_UP_ARROW},
+  {"DOWN", KEY_DOWN_ARROW},
+  {"DOWNARROW", KEY_DOWN_ARROW},
+  {"LEFT", KEY_LEFT_ARROW},
+  {"LEFTARROW", KEY_LEFT_ARROW},
+  {"RIGHT", KEY_RIGHT_ARROW},
+  {"RIGHTARROW", KEY_RIGHT_ARROW},
+  {"PAGEUP", KEY_PAGE_UP},
+  {"PAGE_UP", KEY_PAGE_UP},
+  {"PAGEDOWN", KEY_PAGE_DOWN},
+  {"PAGE_DOWN", KEY_PAGE_DOWN},
+  {"HOME", KEY_HOME},
+  {"END", KEY_END},
+  {"CAPSLOCK", KEY_CAPS_LOCK},
+  {"CAPS", KEY_CAPS_LOCK},
+  {"NUMLOCK", KEY_NUM_LOCK},
+  {"SCROLLLOCK", KEY_SCROLL_LOCK},
+  {"PRINTSCREEN", KEY_PRINT_SCREEN},
+  {"PRINTSCRN", KEY_PRINT_SCREEN},
+  {"PRINT", KEY_PRINT_SCREEN},
+  {"PAUSE", KEY_PAUSE},
+  {"BREAK", KEY_PAUSE},
+  {"APP", KEY_APPLICATION},
+  {"MENU", KEY_APPLICATION},
+  {"SPACE", ' '},
+  {"F1", KEY_F1},
+  {"F2", KEY_F2},
+  {"F3", KEY_F3},
+  {"F4", KEY_F4},
+  {"F5", KEY_F5},
+  {"F6", KEY_F6},
+  {"F7", KEY_F7},
+  {"F8", KEY_F8},
+  {"F9", KEY_F9},
+  {"F10", KEY_F10},
+  {"F11", KEY_F11},
+  {"F12", KEY_F12},
+};
+constexpr size_t FAST_DUCKY_KEYMAP_SIZE = sizeof(FAST_DUCKY_KEYMAP) / sizeof(FAST_DUCKY_KEYMAP[0]);
+
+static inline bool fastStrCaseEquals(const char *a, size_t aLen, const char *b) {
+  size_t bLen = strlen(b);
+  if (aLen != bLen) return false;
+  return (strncasecmp(a, b, aLen) == 0);
 }
 
-size_t findLineEnd(size_t start, size_t totalLength) {
-  size_t i = start;
-  while (i < totalLength && psramBuffer[i] != '\n') i++;
-  return i;
+static inline bool fastStrCaseStartsWith(const char *str, size_t len, const char *prefix, size_t prefixLen) {
+  if (len < prefixLen) return false;
+  return (strncasecmp(str, prefix, prefixLen) == 0);
 }
 
-size_t nextLineStart(size_t lineEnd, size_t totalLength) {
-  if (lineEnd >= totalLength) return totalLength;
-  return lineEnd + 1;
-}
+uint8_t fastResolveDuckyKey(const char *token, size_t len) {
+  if (!token || len == 0) return 0;
 
-uint8_t resolveDuckyKey(const String &token) {
-  String upper = token;
-  upper.toUpperCase();
-  upper.trim();
-
-  if (upper == "ENTER" || upper == "RETURN") return KEY_RETURN;
-  if (upper == "TAB") return KEY_TAB;
-  if (upper == "ESC" || upper == "ESCAPE") return KEY_ESC;
-  if (upper == "BACKSPACE" || upper == "BKSP") return KEY_BACKSPACE;
-  if (upper == "DELETE" || upper == "DEL") return KEY_DELETE;
-  if (upper == "INSERT" || upper == "INS") return KEY_INSERT;
-  if (upper == "UP" || upper == "UPARROW") return KEY_UP_ARROW;
-  if (upper == "DOWN" || upper == "DOWNARROW") return KEY_DOWN_ARROW;
-  if (upper == "LEFT" || upper == "LEFTARROW") return KEY_LEFT_ARROW;
-  if (upper == "RIGHT" || upper == "RIGHTARROW") return KEY_RIGHT_ARROW;
-  if (upper == "PAGEUP" || upper == "PAGE_UP") return KEY_PAGE_UP;
-  if (upper == "PAGEDOWN" || upper == "PAGE_DOWN") return KEY_PAGE_DOWN;
-  if (upper == "HOME") return KEY_HOME;
-  if (upper == "END") return KEY_END;
-  if (upper == "CAPSLOCK" || upper == "CAPS") return KEY_CAPS_LOCK;
-  if (upper == "NUMLOCK") return KEY_NUM_LOCK;
-  if (upper == "SCROLLLOCK") return KEY_SCROLL_LOCK;
-  if (upper == "PRINTSCREEN" || upper == "PRINTSCRN" || upper == "PRINT") return KEY_PRINT_SCREEN;
-  if (upper == "PAUSE" || upper == "BREAK") return KEY_PAUSE;
-  if (upper == "APP" || upper == "MENU") return KEY_APPLICATION;
-  if (upper == "SPACE") return ' ';
-
-  if (upper == "F1") return KEY_F1;
-  if (upper == "F2") return KEY_F2;
-  if (upper == "F3") return KEY_F3;
-  if (upper == "F4") return KEY_F4;
-  if (upper == "F5") return KEY_F5;
-  if (upper == "F6") return KEY_F6;
-  if (upper == "F7") return KEY_F7;
-  if (upper == "F8") return KEY_F8;
-  if (upper == "F9") return KEY_F9;
-  if (upper == "F10") return KEY_F10;
-  if (upper == "F11") return KEY_F11;
-  if (upper == "F12") return KEY_F12;
-
-  if (token.length() == 1) {
-    char c = token[0];
-    if (c >= 'A' && c <= 'Z') {
-      return static_cast<uint8_t>(c - 'A' + 'a');
+  for (size_t i = 0; i < FAST_DUCKY_KEYMAP_SIZE; i++) {
+    if (fastStrCaseEquals(token, len, FAST_DUCKY_KEYMAP[i].name)) {
+      return FAST_DUCKY_KEYMAP[i].scancode;
     }
+  }
+
+  if (len == 1) {
+    char c = token[0];
+    if (c >= 'A' && c <= 'Z') return static_cast<uint8_t>(c - 'A' + 'a');
     return static_cast<uint8_t>(c);
   }
 
   return 0;
 }
 
-bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
-  String trimmed = rawLine;
-  trimmed.trim();
-  if (trimmed.isEmpty()) return false;
+uint8_t resolveDuckyKey(const String &token) {
+  return fastResolveDuckyKey(token.c_str(), token.length());
+}
 
-  String upper = trimmed;
-  upper.toUpperCase();
+bool executeDuckyCommandLineFast(const char *line, size_t len, int defaultDelay) {
+  while (len > 0 && (*line == ' ' || *line == '\t' || *line == '\r')) {
+    line++;
+    len--;
+  }
+  while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t' || line[len - 1] == '\r')) {
+    len--;
+  }
+  if (len == 0) return false;
 
-  if (upper.startsWith("REM")) return false;
+  if (fastStrCaseStartsWith(line, len, "REM", 3)) return false;
 
-  if (upper.startsWith("STRING ")) {
-    int spacePos = rawLine.indexOf(' ');
-    if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
-      String payload = rawLine.substring(spacePos + 1);
-      for (size_t c = 0; c < payload.length(); c++) {
-        if (stopScriptFlag) break;
-        Keyboard.write(static_cast<uint8_t>(payload[c]));
-        if (typeDelay > 0) delay(typeDelay);
-      }
+  if (fastStrCaseStartsWith(line, len, "STRING ", 7)) {
+    const char *payload = line + 7;
+    size_t payloadLen = len - 7;
+    for (size_t c = 0; c < payloadLen; c++) {
+      if (stopScriptFlag) break;
+      Keyboard.write(static_cast<uint8_t>(payload[c]));
+      if (typeDelay > 0) delay(typeDelay);
     }
-  } else if (upper.startsWith("STRINGLN ")) {
-    int spacePos = rawLine.indexOf(' ');
-    if (spacePos >= 0 && static_cast<size_t>(spacePos + 1) < rawLine.length()) {
-      String payload = rawLine.substring(spacePos + 1);
-      for (size_t c = 0; c < payload.length(); c++) {
-        if (stopScriptFlag) break;
-        Keyboard.write(static_cast<uint8_t>(payload[c]));
-        if (typeDelay > 0) delay(typeDelay);
-      }
-      keyboardTap(KEY_RETURN);
+  } else if (fastStrCaseStartsWith(line, len, "STRINGLN ", 9)) {
+    const char *payload = line + 9;
+    size_t payloadLen = len - 9;
+    for (size_t c = 0; c < payloadLen; c++) {
+      if (stopScriptFlag) break;
+      Keyboard.write(static_cast<uint8_t>(payload[c]));
+      if (typeDelay > 0) delay(typeDelay);
     }
-  } else if (upper.startsWith("DELAY ")) {
-    int d = trimmed.substring(6).toInt();
+    keyboardTap(KEY_RETURN);
+  } else if (fastStrCaseStartsWith(line, len, "DELAY ", 6)) {
+    int d = atoi(line + 6);
     if (d > 0) delay(d);
-  } else if (upper.startsWith("MOUSE_MOVE_ABS ") || upper.startsWith("MOUSEMOVEABS ")) {
-    String args = trimmed.substring(trimmed.indexOf(' ') + 1);
-    args.trim();
-    int sp = args.indexOf(' ');
-    if (sp > 0) {
-      float x = args.substring(0, sp).toFloat();
-      float y = args.substring(sp + 1).toFloat();
-      mouseMoveAbsolute(x, y);
-    }
-  } else if (upper.startsWith("MOUSE_CLICK_ABS ") || upper.startsWith("MOUSECLICKABS ")) {
-    String args = trimmed.substring(trimmed.indexOf(' ') + 1);
-    args.trim();
-    int sp1 = args.indexOf(' ');
-    if (sp1 > 0) {
-      String btn = args.substring(0, sp1);
-      int sp2 = args.indexOf(' ', sp1 + 1);
-      if (sp2 > 0) {
-        float x = args.substring(sp1 + 1, sp2).toFloat();
-        float y = args.substring(sp2 + 1).toFloat();
-        mouseMoveAbsolute(x, y, parseMouseButton(btn), MOUSE_ACTION_CLICK);
-      }
-    }
+  } else if (fastStrCaseStartsWith(line, len, "MOUSE_MOVE_ABS ", 15) || fastStrCaseStartsWith(line, len, "MOUSEMOVEABS ", 13)) {
+    size_t offset = (line[5] == '_') ? 15 : 13;
+    const char *p = line + offset;
+    float x = atof(p);
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    float y = atof(p);
+    mouseMoveAbsolute(x, y);
+  } else if (fastStrCaseStartsWith(line, len, "MOUSE_CLICK_ABS ", 16) || fastStrCaseStartsWith(line, len, "MOUSECLICKABS ", 14)) {
+    size_t offset = (line[5] == '_') ? 16 : 14;
+    const char *p = line + offset;
+    while (*p == ' ' || *p == '\t') p++;
+    const char *btnStart = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    size_t btnLen = p - btnStart;
+    while (*p == ' ' || *p == '\t') p++;
+    float x = atof(p);
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    float y = atof(p);
+    char btnBuf[16];
+    size_t cpy = (btnLen < 15) ? btnLen : 15;
+    memcpy(btnBuf, btnStart, cpy);
+    btnBuf[cpy] = '\0';
+    mouseMoveAbsolute(x, y, parseMouseButton(String(btnBuf)), MOUSE_ACTION_CLICK);
   } else {
-    String normalized = trimmed;
-    for (size_t k = 0; k < normalized.length(); k++) {
-      if (normalized[k] == '+' || normalized[k] == '-') normalized[k] = ' ';
-    }
-
     bool ctrl = false, alt = false, shift = false, gui = false;
     uint8_t targetKey = 0;
     int tokenCount = 0;
 
-    int pos = 0;
-    while (pos < static_cast<int>(normalized.length())) {
-      while (pos < static_cast<int>(normalized.length()) && normalized[pos] == ' ') pos++;
-      if (pos >= static_cast<int>(normalized.length())) break;
+    const char *cursor = line;
+    const char *end = line + len;
 
-      int nextSpace = normalized.indexOf(' ', pos);
-      if (nextSpace < 0) nextSpace = normalized.length();
+    while (cursor < end) {
+      while (cursor < end && (*cursor == ' ' || *cursor == '\t' || *cursor == '+' || *cursor == '-')) cursor++;
+      if (cursor >= end) break;
 
-      String token = normalized.substring(pos, nextSpace);
-      pos = nextSpace;
-
-      String tokUpper = token;
-      tokUpper.toUpperCase();
-      tokUpper.trim();
-
-      if (tokUpper.isEmpty()) continue;
+      const char *tokStart = cursor;
+      while (cursor < end && *cursor != ' ' && *cursor != '\t' && *cursor != '+' && *cursor != '-') cursor++;
+      size_t tokLen = cursor - tokStart;
+      if (tokLen == 0) continue;
       tokenCount++;
 
-      if (tokUpper == "CTRL" || tokUpper == "CONTROL") {
+      if (fastStrCaseEquals(tokStart, tokLen, "CTRL") || fastStrCaseEquals(tokStart, tokLen, "CONTROL")) {
         ctrl = true;
-      } else if (tokUpper == "ALT") {
+      } else if (fastStrCaseEquals(tokStart, tokLen, "ALT")) {
         alt = true;
-      } else if (tokUpper == "SHIFT") {
+      } else if (fastStrCaseEquals(tokStart, tokLen, "SHIFT")) {
         shift = true;
-      } else if (tokUpper == "GUI" || tokUpper == "WINDOWS" || tokUpper == "WIN" || tokUpper == "COMMAND") {
+      } else if (fastStrCaseEquals(tokStart, tokLen, "GUI") || fastStrCaseEquals(tokStart, tokLen, "WINDOWS") || fastStrCaseEquals(tokStart, tokLen, "WIN") || fastStrCaseEquals(tokStart, tokLen, "COMMAND")) {
         gui = true;
       } else {
-        uint8_t k = resolveDuckyKey(token);
+        uint8_t k = fastResolveDuckyKey(tokStart, tokLen);
         if (k != 0) {
           targetKey = k;
-        } else if (token.length() == 1) {
-          char c = token[0];
+        } else if (tokLen == 1) {
+          char c = tokStart[0];
           if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
           targetKey = static_cast<uint8_t>(c);
         }
@@ -1502,70 +1512,95 @@ bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
   return true;
 }
 
+bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
+  return executeDuckyCommandLineFast(rawLine.c_str(), rawLine.length(), defaultDelay);
+}
+
 void parseAndExecuteInternal(size_t totalLength) {
+  if (!psramBuffer || totalLength == 0) return;
+
   size_t i = 0;
   int defaultDelay = 0;
   int lineCounter = 0;
-  String lastExecutableLine = "";
 
   scriptTotalLines = 0;
+  const char *bufPtr = psramBuffer;
   for (size_t c = 0; c < totalLength; c++) {
-    if (psramBuffer[c] == '\n') scriptTotalLines++;
+    if (bufPtr[c] == '\n') scriptTotalLines++;
   }
-  if (totalLength > 0 && psramBuffer[totalLength - 1] != '\n') scriptTotalLines++;
+  if (totalLength > 0 && bufPtr[totalLength - 1] != '\n') scriptTotalLines++;
   if (scriptTotalLines == 0) scriptTotalLines = 1;
+
   scriptCurrentLine = 0;
   scriptProgressPercent = 0;
   scriptCurrentCommand = "";
+
+  char lastExecBuf[128] = {0};
+  size_t lastExecLen = 0;
 
   while (i < totalLength) {
     if (stopScriptFlag) break;
 
     size_t lineStart = i;
-    size_t lineEnd = findLineEnd(lineStart, totalLength);
-    i = nextLineStart(lineEnd, totalLength);
+    while (i < totalLength && psramBuffer[i] != '\n') i++;
+    size_t lineEnd = i;
+    if (i < totalLength && psramBuffer[i] == '\n') i++;
 
-    String rawLine = readLineRange(lineStart, lineEnd);
-    String trimmed = rawLine;
-    trimmed.trim();
+    const char *line = psramBuffer + lineStart;
+    size_t lineLen = lineEnd - lineStart;
+
+    while (lineLen > 0 && (*line == ' ' || *line == '\t' || *line == '\r')) {
+      line++;
+      lineLen--;
+    }
+    while (lineLen > 0 && (line[lineLen - 1] == ' ' || line[lineLen - 1] == '\t' || line[lineLen - 1] == '\r')) {
+      lineLen--;
+    }
 
     scriptCurrentLine++;
     scriptProgressPercent = static_cast<uint8_t>(clampInt(static_cast<int>((scriptCurrentLine * 100) / scriptTotalLines), 0, 100));
-    scriptCurrentCommand = trimmed.substring(0, 48);
 
-    if (trimmed.isEmpty()) continue;
+    if (lineLen == 0) continue;
 
-    String upper = trimmed;
-    upper.toUpperCase();
+    size_t previewLen = (lineLen < 48) ? lineLen : 48;
+    char previewBuf[52];
+    memcpy(previewBuf, line, previewLen);
+    previewBuf[previewLen] = '\0';
+    scriptCurrentCommand = previewBuf;
 
-    if (upper.startsWith("REM")) continue;
+    if (fastStrCaseStartsWith(line, lineLen, "REM", 3)) continue;
 
-    if (upper.startsWith("DEFAULT_DELAY ")) {
-      defaultDelay = clampInt(trimmed.substring(14).toInt(), 0, 5000);
+    if (fastStrCaseStartsWith(line, lineLen, "DEFAULT_DELAY ", 14)) {
+      defaultDelay = clampInt(atoi(line + 14), 0, 5000);
       continue;
-    } else if (upper.startsWith("DEFAULTDELAY ")) {
-      defaultDelay = clampInt(trimmed.substring(13).toInt(), 0, 5000);
+    } else if (fastStrCaseStartsWith(line, lineLen, "DEFAULTDELAY ", 13)) {
+      defaultDelay = clampInt(atoi(line + 13), 0, 5000);
       continue;
     }
 
-    if (upper == "BLOCK") {
+    if (fastStrCaseEquals(line, lineLen, "BLOCK")) {
       size_t blockStart = i;
-      size_t cursor = i;
       size_t blockEnd = totalLength;
       bool foundEnd = false;
 
+      size_t cursor = i;
       while (cursor < totalLength) {
-        size_t markerEnd = findLineEnd(cursor, totalLength);
-        String marker = readLineRange(cursor, markerEnd);
-        marker.trim();
-        marker.toUpperCase();
-        if (marker == "ENDBLOCK") {
-          blockEnd = cursor;
-          i = nextLineStart(markerEnd, totalLength);
+        size_t mStart = cursor;
+        while (cursor < totalLength && psramBuffer[cursor] != '\n') cursor++;
+        size_t mEnd = cursor;
+        if (cursor < totalLength && psramBuffer[cursor] == '\n') cursor++;
+
+        const char *m = psramBuffer + mStart;
+        size_t mLen = mEnd - mStart;
+        while (mLen > 0 && (*m == ' ' || *m == '\t' || *m == '\r')) { m++; mLen--; }
+        while (mLen > 0 && (m[mLen - 1] == ' ' || m[mLen - 1] == '\t' || m[mLen - 1] == '\r')) mLen--;
+
+        if (fastStrCaseEquals(m, mLen, "ENDBLOCK")) {
+          blockEnd = mStart;
+          i = cursor;
           foundEnd = true;
           break;
         }
-        cursor = nextLineStart(markerEnd, totalLength);
       }
 
       if (!foundEnd) {
@@ -1575,29 +1610,31 @@ void parseAndExecuteInternal(size_t totalLength) {
       if (blockEnd > blockStart) {
         typeTextInternal(blockStart, blockEnd - blockStart);
       }
-      lastExecutableLine = "";
+      lastExecLen = 0;
       continue;
     }
 
-    if (upper.startsWith("REPEAT ")) {
-      int repeatCount = clampInt(trimmed.substring(7).toInt(), 1, 1000);
-      if (!lastExecutableLine.isEmpty()) {
+    if (fastStrCaseStartsWith(line, lineLen, "REPEAT ", 7)) {
+      int repeatCount = clampInt(atoi(line + 7), 1, 1000);
+      if (lastExecLen > 0) {
         for (int r = 0; r < repeatCount; r++) {
           if (stopScriptFlag) break;
-          executeDuckyCommandLine(lastExecutableLine, defaultDelay);
+          executeDuckyCommandLineFast(lastExecBuf, lastExecLen, defaultDelay);
           lineCounter++;
-          if (lineCounter % 8 == 0) vTaskDelay(1);
+          if (lineCounter % 16 == 0) vTaskDelay(1);
         }
       }
       continue;
     }
 
-    if (executeDuckyCommandLine(rawLine, defaultDelay)) {
-      lastExecutableLine = rawLine;
+    if (executeDuckyCommandLineFast(line, lineLen, defaultDelay)) {
+      lastExecLen = (lineLen < 127) ? lineLen : 127;
+      memcpy(lastExecBuf, line, lastExecLen);
+      lastExecBuf[lastExecLen] = '\0';
     }
 
     lineCounter++;
-    if (lineCounter % 8 == 0) {
+    if (lineCounter % 16 == 0) {
       vTaskDelay(1);
     }
   }
