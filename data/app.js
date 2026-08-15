@@ -2649,17 +2649,25 @@ async function saveSettings() {
       return;
     }
 
+    let usbRestart = false;
+    let wifiRestart = false;
     let restartNeeded = false;
     try {
       const responseData = await res.json();
-      restartNeeded = Boolean(responseData.usb_restart_required);
+      usbRestart = Boolean(responseData.usb_restart_required);
+      wifiRestart = Boolean(responseData.wifi_restart_required);
+      restartNeeded = Boolean(responseData.restart_required || usbRestart || wifiRestart);
     } catch (_) {}
 
     qs("admin-pass").value = "";
-    if (restartNeeded) {
-      setText("settings-status", "Settings saved. USB identity changes will apply after reboot.");
+    if (usbRestart && wifiRestart) {
+      setText("settings-status", "⚠️ Settings saved to NVS! A reboot is required to apply new USB descriptors and WiFi network.");
+    } else if (usbRestart) {
+      setText("settings-status", "⚠️ Settings saved to NVS! A reboot is required to apply new USB hardware VID/PID descriptors.");
+    } else if (wifiRestart) {
+      setText("settings-status", "⚠️ Settings saved to NVS! A reboot is required to connect to the new WiFi network.");
     } else {
-      setText("settings-status", "Settings saved.");
+      setText("settings-status", "✅ Settings applied live in real-time! (No reboot needed)");
     }
 
     updateVendorPresetSelectionFromFields();

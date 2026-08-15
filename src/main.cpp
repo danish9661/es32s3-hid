@@ -1444,8 +1444,9 @@ void loadSettings() {
   pixels.setBrightness(ledBrightness);
 }
 
-bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
+bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &wifiChanged) {
   usbIdentityChanged = false;
+  wifiChanged = false;
 
   DynamicJsonDocument doc(2304);
   DeserializationError err = deserializeJson(doc, jsonBody);
@@ -1456,6 +1457,11 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
   String oldUsbVendorName = usbVendorName;
   String oldUsbProductName = usbProductName;
   bool oldUsbMscEnabled = usbMscEnabled;
+
+  String oldApSsid = ap_ssid;
+  String oldApPass = ap_pass;
+  String oldStaSsid = sta_ssid;
+  String oldStaPass = sta_pass;
 
   if (doc.containsKey("ap_ssid")) ap_ssid = doc["ap_ssid"].as<String>();
   if (doc.containsKey("ap_pass")) {
@@ -1552,7 +1558,14 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
     (oldUsbVid != usbVendorId) ||
     (oldUsbPid != usbProductId) ||
     (oldUsbVendorName != usbVendorName) ||
-    (oldUsbProductName != usbProductName);
+    (oldUsbProductName != usbProductName) ||
+    (oldUsbMscEnabled != usbMscEnabled);
+
+  wifiChanged =
+    (oldApSsid != ap_ssid) ||
+    (oldApPass != ap_pass) ||
+    (oldStaSsid != sta_ssid) ||
+    (oldStaPass != sta_pass);
 
   return true;
 }
@@ -3841,7 +3854,8 @@ void registerRoutes() {
 
       if (index + len == total) {
         bool usbIdentityChanged = false;
-        bool parsed = applySettingsJson(*body, usbIdentityChanged);
+        bool wifiChanged = false;
+        bool parsed = applySettingsJson(*body, usbIdentityChanged, wifiChanged);
 
         delete body;
         request->_tempObject = nullptr;
@@ -3853,6 +3867,10 @@ void registerRoutes() {
 
         String response = "{\"saved\":true,\"usb_restart_required\":";
         response += usbIdentityChanged ? "true" : "false";
+        response += ",\"wifi_restart_required\":";
+        response += wifiChanged ? "true" : "false";
+        response += ",\"restart_required\":";
+        response += (usbIdentityChanged || wifiChanged) ? "true" : "false";
         response += "}";
 
         request->send(200, "application/json", response);
