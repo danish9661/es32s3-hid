@@ -8,6 +8,12 @@ static std::vector<FidoCredential> credentials;
 static uint32_t globalCounter = 1;
 static bool initialized = false;
 
+static bool pinIsSet = false;
+static uint8_t pinStoredHash[32] = {0};
+static uint8_t pinRetriesLeft = 8;
+static uint8_t currentPinToken[32] = {0};
+static bool pinTokenValid = false;
+
 // W3C WebAuthn Spec: For authenticators using self-attestation or none attestation,
 // the AAGUID field MUST be set to 16 zero bytes (0x00).
 static const uint8_t ESP32_AAGUID[16] = {
@@ -153,6 +159,11 @@ bool FidoStore::loadFromStorage() {
   Preferences prefs;
   if (prefs.begin("fido_nvs", true)) {
     globalCounter = prefs.getUInt("counter", 1);
+    pinIsSet = prefs.getBool("pin_set", false);
+    pinRetriesLeft = prefs.getUChar("pin_retries", 8);
+    if (pinIsSet) {
+      prefs.getBytes("pin_hash", pinStoredHash, 32);
+    }
     prefs.end();
   }
 
@@ -184,6 +195,11 @@ bool FidoStore::loadFromStorage() {
     c.pubKeyY = fromHex(obj["pubKeyY"] | "");
     c.signCounter = obj["signCounter"] | 0;
     c.createdAt = obj["createdAt"] | 0;
+    c.hmacSecretKey = fromHex(obj["hmacSecretKey"] | "");
+    if (c.hmacSecretKey.empty()) {
+      c.hmacSecretKey.resize(32);
+      esp_fill_random(c.hmacSecretKey.data(), 32);
+    }
 
     if (!c.credId.empty() && !c.privKey.empty()) {
       credentials.push_back(c);
@@ -213,6 +229,7 @@ bool FidoStore::saveToStorage() {
     obj["privKey"] = toHex(c.privKey.data(), c.privKey.size());
     obj["pubKeyX"] = toHex(c.pubKeyX.data(), c.pubKeyX.size());
     obj["pubKeyY"] = toHex(c.pubKeyY.data(), c.pubKeyY.size());
+    obj["hmacSecretKey"] = toHex(c.hmacSecretKey.data(), c.hmacSecretKey.size());
     obj["signCounter"] = c.signCounter;
     obj["createdAt"] = c.createdAt;
   }
@@ -223,19 +240,6 @@ bool FidoStore::saveToStorage() {
   f.close();
 
   return true;
-}
-
-void FidoStore::clearAll() {
-  credentials.clear();
-  globalCounter = 1;
-  if (LittleFS.exists("/passkeys.json")) {
-    LittleFS.remove("/passkeys.json");
-  }
-  Preferences prefs;
-  if (prefs.begin("fido_nvs", false)) {
-    prefs.clear();
-    prefs.end();
-  }
 }
 
 bool FidoStore::createCredential(
@@ -255,6 +259,10 @@ bool FidoStore::createCredential(
   // Generate unique 32-byte Credential ID
   outCred.credId.resize(32);
   esp_fill_random(outCred.credId.data(), 32);
+
+  // Generate 32-byte master HMAC secret for hmac-secret / prf extension
+  outCred.hmacSecretKey.resize(32);
+  esp_fill_random(outCred.hmacSecretKey.data(), 32);
 
   // Generate secp256r1 keypair
   if (!generateKeyPair(outCred.privKey, outCred.pubKeyX, outCred.pubKeyY)) {
@@ -277,6 +285,264 @@ bool FidoStore::createCredential(
 
   saveToStorage();
   return true;
+}
+
+bool FidoStore::deleteCredential(const std::vector<uint8_t> &credId) {
+  for (auto it = credentials.begin(); it != credentials.end(); ++it) {
+    if (it->credId == credId) {
+      credentials.erase(it);
+      saveToStorage();
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::vector<uint8_t> largeBlobCache;
+
+bool FidoStore::getLargeBlob(std::vector<uint8_t> &outBlob) {
+  if (largeBlobCache.empty()) {
+    Preferences prefs;
+    if (prefs.begin("fido_blob", true)) {
+      size_t len = prefs.getBytesLength("blob");
+      if (len > 0 && len <= 2048) {
+        largeBlobCache.resize(len);
+        prefs.getBytes("blob", largeBlobCache.data(), len);
+      }
+      prefs.end();
+    }
+  }
+  outBlob = largeBlobCache;
+  return true;
+}
+
+bool FidoStore::setLargeBlob(const uint8_t *blobData, size_t len) {
+  if (len > 2048) return false;
+  if (blobData && len > 0) {
+    largeBlobCache.assign(blobData, blobData + len);
+  } else {
+    largeBlobCache.clear();
+  }
+  Preferences prefs;
+  if (prefs.begin("fido_blob", false)) {
+    if (largeBlobCache.empty()) {
+      prefs.remove("blob");
+    } else {
+      prefs.putBytes("blob", largeBlobCache.data(), largeBlobCache.size());
+    }
+    prefs.end();
+  }
+  return true;
+}
+
+void FidoStore::clearLargeBlob() {
+  largeBlobCache.clear();
+  Preferences prefs;
+  if (prefs.begin("fido_blob", false)) {
+    prefs.clear();
+    prefs.end();
+  }
+}
+
+void FidoStore::clearAll() {
+  credentials.clear();
+  globalCounter = 1;
+  clearPin();
+  clearLargeBlob();
+
+  LittleFS.remove("/fido_credentials.json");
+
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.clear();
+    prefs.end();
+  }
+}
+
+void FidoStore::hmacSha256(const uint8_t *key, size_t keyLen, const uint8_t *data, size_t dataLen, uint8_t *out32) {
+  const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  mbedtls_md_hmac(md_info, key, keyLen, data, dataLen, out32);
+}
+
+bool FidoStore::computeSharedSecret(
+  const std::vector<uint8_t> &privKey,
+  const std::vector<uint8_t> &peerPubX,
+  const std::vector<uint8_t> &peerPubY,
+  std::vector<uint8_t> &outSharedKey32
+) {
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+
+  mbedtls_mpi d;
+  mbedtls_mpi_init(&d);
+  mbedtls_mpi_read_binary(&d, privKey.data(), privKey.size());
+
+  mbedtls_ecp_point Q_peer;
+  mbedtls_ecp_point_init(&Q_peer);
+  mbedtls_mpi_read_binary(&Q_peer.X, peerPubX.data(), peerPubX.size());
+  mbedtls_mpi_read_binary(&Q_peer.Y, peerPubY.data(), peerPubY.size());
+  mbedtls_mpi_lset(&Q_peer.Z, 1);
+
+  mbedtls_ecp_point P_shared;
+  mbedtls_ecp_point_init(&P_shared);
+
+  int ret = mbedtls_ecp_mul(&grp, &P_shared, &d, &Q_peer, mbedtls_esp_rng, nullptr);
+
+  bool ok = false;
+  if (ret == 0) {
+    uint8_t zBuf[32];
+    mbedtls_mpi_write_binary(&P_shared.X, zBuf, 32);
+    outSharedKey32.resize(32);
+    sha256(zBuf, 32, outSharedKey32.data());
+    ok = true;
+  }
+
+  mbedtls_ecp_point_free(&P_shared);
+  mbedtls_ecp_point_free(&Q_peer);
+  mbedtls_mpi_free(&d);
+  mbedtls_ecp_group_free(&grp);
+  return ok;
+}
+
+bool FidoStore::aes256CbcDecrypt(
+  const uint8_t *key32,
+  const uint8_t *iv16,
+  const uint8_t *input,
+  size_t len,
+  std::vector<uint8_t> &output
+) {
+  if (len == 0 || (len % 16) != 0) return false;
+  output.resize(len);
+
+  uint8_t iv[16];
+  if (iv16) memcpy(iv, iv16, 16);
+  else memset(iv, 0, 16);
+
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_dec(&aes, key32, 256);
+  int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, len, iv, input, output.data());
+  mbedtls_aes_free(&aes);
+  return ret == 0;
+}
+
+bool FidoStore::aes256CbcEncrypt(
+  const uint8_t *key32,
+  const uint8_t *iv16,
+  const uint8_t *input,
+  size_t len,
+  std::vector<uint8_t> &output
+) {
+  if (len == 0 || (len % 16) != 0) return false;
+  output.resize(len);
+
+  uint8_t iv[16];
+  if (iv16) memcpy(iv, iv16, 16);
+  else memset(iv, 0, 16);
+
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, key32, 256);
+  int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, len, iv, input, output.data());
+  mbedtls_aes_free(&aes);
+  return ret == 0;
+}
+
+bool FidoStore::isPinSet() {
+  return pinIsSet;
+}
+
+uint8_t FidoStore::getPinRetries() {
+  return pinRetriesLeft;
+}
+
+void FidoStore::decrementPinRetries() {
+  if (pinRetriesLeft > 0) pinRetriesLeft--;
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putUChar("pin_retries", pinRetriesLeft);
+    prefs.end();
+  }
+}
+
+void FidoStore::resetPinRetries() {
+  pinRetriesLeft = 8;
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putUChar("pin_retries", 8);
+    prefs.end();
+  }
+}
+
+bool FidoStore::setPin(const uint8_t *decryptedPin64, size_t pinLen) {
+  if (pinLen < 4) return false;
+  sha256(decryptedPin64, pinLen, pinStoredHash);
+  pinIsSet = true;
+  pinRetriesLeft = 8;
+
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putBool("pin_set", true);
+    prefs.putBytes("pin_hash", pinStoredHash, 32);
+    prefs.putUChar("pin_retries", 8);
+    prefs.end();
+  }
+  return true;
+}
+
+bool FidoStore::changePin(const uint8_t *oldPin64, size_t oldLen, const uint8_t *newPin64, size_t newLen) {
+  if (!pinIsSet || pinRetriesLeft == 0) return false;
+  uint8_t oldHash[32];
+  sha256(oldPin64, oldLen, oldHash);
+  if (memcmp(oldHash, pinStoredHash, 32) != 0) {
+    decrementPinRetries();
+    return false;
+  }
+  return setPin(newPin64, newLen);
+}
+
+bool FidoStore::verifyPinHash(const uint8_t *pinHash16) {
+  if (!pinIsSet || pinRetriesLeft == 0) return false;
+  if (memcmp(pinStoredHash, pinHash16, 16) == 0) {
+    resetPinRetries();
+    return true;
+  }
+  decrementPinRetries();
+  return false;
+}
+
+void FidoStore::clearPin() {
+  pinIsSet = false;
+  pinRetriesLeft = 8;
+  pinTokenValid = false;
+  memset(pinStoredHash, 0, 32);
+  memset(currentPinToken, 0, 32);
+
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putBool("pin_set", false);
+    prefs.remove("pin_hash");
+    prefs.putUInt("pin_retries", 8);
+    prefs.end();
+  }
+}
+
+void FidoStore::getPinToken(uint8_t *out32) {
+  if (!pinTokenValid) {
+    esp_fill_random(currentPinToken, 32);
+    pinTokenValid = true;
+  }
+  memcpy(out32, currentPinToken, 32);
+}
+
+bool FidoStore::verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pinAuth16) {
+  if (!pinIsSet) return true; // If PIN not set, pinAuth is not required
+  if (!pinTokenValid) return false;
+
+  uint8_t computedAuth[32];
+  hmacSha256(currentPinToken, 32, clientDataHash32, 32, computedAuth);
+  return memcmp(computedAuth, pinAuth16, 16) == 0;
 }
 
 FidoCredential* FidoStore::findCredential(const std::vector<uint8_t> &credId) {

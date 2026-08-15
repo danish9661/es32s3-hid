@@ -34,8 +34,8 @@ CTAP2 commands are encapsulated inside `CTAPHID_CBOR` (`0x90`) frames and encode
 | **`0x01`** | **`authenticatorMakeCredential`** | ✅ **Active** | Generates hardware-accelerated NIST P-256 ECC keypair, persists discoverable passkey in LittleFS, computes packed self-attestation, and returns `unsignedExtensionOutputs: {"credProps": {"rk": true}}`. |
 | **`0x02`** | **`authenticatorGetAssertion`** | ✅ **Active** | Single-touch authentication. Matches target credential via `allowList` or `rpId`, increments global monotonic signature counter, computes ECDSA signature, and outputs `0x04: user` descriptor for instant account resolution. |
 | **`0x03`** | **`authenticatorGetNextAssertion`** | ✅ **Active** | Standards fallback. Returns `CTAP2_ERR_NOT_ALLOWED` when multiple assertions are not queued. |
-| **`0x06`** | **`authenticatorClientPIN`** | ✅ **Active** | Standard options check. Returns `CTAP2_ERR_UNSUPPORTED_OPTION` since built-in User Verification (`uv: true`) handles verification without PIN. |
-| **`0x07`** | **`authenticatorReset`** | ✅ **Active** | Security-gated hardware factory reset. Demands physical `BOOT` button touch, then wipes all stored credentials in flash and generates a fresh global counter. |
+| **`0x06`** | **`authenticatorClientPIN`** | ✅ **Active** | Full **CTAP2 PIN Protocol 1**. Supports ephemeral ECDH NIST P-256 key agreement, AES-256-CBC decryption, HMAC-SHA-256 PIN authentication, 8-attempt brute-force protection, and `pinToken` generation for Windows Hello and WebAuthn PIN management. |
+| **`0x07`** | **`authenticatorReset`** | ✅ **Active** | Security-gated hardware factory reset. Demands physical `BOOT` button touch, then wipes all stored credentials & PIN in flash and generates a fresh global counter. |
 
 ---
 
@@ -89,3 +89,23 @@ flowchart TD
 | **Linux (Fedora / Ubuntu / Arch)** | Google Chrome, Brave, Chromium | ✅ **Pass** | Chromium `HidServiceLinux` CTAP2 stack |
 | **macOS & iOS** | Safari, Chrome, Edge | ✅ **Pass** | Native Apple WebAuthenticationKit |
 | **Android (10+)** | Chrome, Samsung Internet | ✅ **Pass** | Google Play Services FIDO2 Client |
+
+---
+
+## 6. Advanced CTAP 2.1 Extensions & Capabilities
+
+### A. Credential Management (`0x0A`)
+Enables host operating systems and browsers (e.g. Chrome/Edge Security Key Settings) to enumerate, inspect metadata, and delete individual credentials stored in hardware flash:
+* `0x01 (getCredsMetadata)`: Resident credential count and remaining storage capacity.
+* `0x02 (enumerateRPsBegin)` / `0x03 (enumerateRPsGetNextRP)`: Lists all Relying Party domains.
+* `0x04 (enumerateCredentialsBegin)` / `0x05 (enumerateCredentialsGetNextCredential)`: Lists accounts per RP.
+* `0x06 (deleteCredential)`: Deletes individual credentials by 32-byte Credential ID.
+
+### B. HMAC-Secret / PRF (`hmac-secret`) Extension
+Generates deterministic symmetric keys derived from the master credential secret $K_{cred}$:
+* $O = \text{HMAC-SHA-256}(K_{cred}, \text{salt})$
+* Used by **1Password**, **Bitwarden**, and WebAuthn PRF to encrypt and decrypt password manager vaults using a physical passkey.
+
+### C. Large Blobs (`0x08`)
+Allows storing arbitrary encrypted configuration or certificates (up to 2048 bytes) in LittleFS flash (`/large_blob.bin`).
+

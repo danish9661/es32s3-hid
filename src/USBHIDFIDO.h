@@ -56,7 +56,20 @@ private:
   void handleCbor(uint32_t cid, const uint8_t *data, size_t len);
   void handleMsg(uint32_t cid, const uint8_t *data, size_t len);
 
+  // Ephemeral ECDH key agreement state for Client PIN protocol
+  std::vector<uint8_t> ecdhPrivKey;
+  std::vector<uint8_t> ecdhPubX;
+  std::vector<uint8_t> ecdhPubY;
+
+  // Enumeration state for Credential Management
+  size_t enumRpIndex;
+  size_t enumCredIndex;
+  uint8_t enumRpIdHash[32];
+
   void handleGetInfo(uint32_t cid);
+  void handleClientPin(uint32_t cid, const uint8_t *data, size_t len);
+  void handleCredentialManagement(uint32_t cid, const uint8_t *data, size_t len);
+  void handleLargeBlob(uint32_t cid, const uint8_t *data, size_t len);
   void executeMakeCredential();
   void executeGetAssertion();
   void executeReset();

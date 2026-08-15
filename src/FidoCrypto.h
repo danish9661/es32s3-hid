@@ -5,6 +5,7 @@
 #include "mbedtls/ecp.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/md.h"
+#include "mbedtls/aes.h"
 
 // FIDO2 / CTAP2 Constants
 constexpr uint8_t CTAP2_OK = 0x00;
@@ -17,6 +18,13 @@ constexpr uint8_t CTAP2_ERR_UNSUPPORTED_OPTION = 0x2B;
 constexpr uint8_t CTAP2_ERR_NO_CREDENTIALS = 0x2E;
 constexpr uint8_t CTAP2_ERR_USER_ACTION_TIMEOUT = 0x32;
 constexpr uint8_t CTAP2_ERR_NOT_ALLOWED = 0x30;
+constexpr uint8_t CTAP2_ERR_PIN_INVALID = 0x31;
+constexpr uint8_t CTAP2_ERR_PIN_BLOCKED = 0x32;
+constexpr uint8_t CTAP2_ERR_PIN_AUTH_INVALID = 0x33;
+constexpr uint8_t CTAP2_ERR_PIN_AUTH_BLOCKED = 0x34;
+constexpr uint8_t CTAP2_ERR_PIN_NOT_SET = 0x35;
+constexpr uint8_t CTAP2_ERR_PIN_REQUIRED = 0x36;
+constexpr uint8_t CTAP2_ERR_PIN_POLICY_VIOLATION = 0x37;
 
 // Authenticator Flags
 constexpr uint8_t FLAG_USER_PRESENT = 0x01;
@@ -33,6 +41,7 @@ struct FidoCredential {
   std::vector<uint8_t> privKey;  // 32-byte raw EC private key scalar
   std::vector<uint8_t> pubKeyX;  // 32-byte X coordinate
   std::vector<uint8_t> pubKeyY;  // 32-byte Y coordinate
+  std::vector<uint8_t> hmacSecretKey; // 32-byte master HMAC secret for hmac-secret / prf extension
   uint32_t signCounter;
   uint32_t createdAt;
 };
@@ -55,7 +64,12 @@ public:
   static FidoCredential* findCredential(const std::vector<uint8_t> &credId);
   static FidoCredential* findCredentialByRp(const String &rpId);
   static std::vector<FidoCredential>& getAllCredentials();
+  static bool deleteCredential(const std::vector<uint8_t> &credId);
   static uint32_t getNextGlobalCounter();
+
+  static bool getLargeBlob(std::vector<uint8_t> &outBlob);
+  static bool setLargeBlob(const uint8_t *blobData, size_t len);
+  static void clearLargeBlob();
 
   static void getAaguid(uint8_t *out16);
 
@@ -74,4 +88,43 @@ public:
   );
 
   static void sha256(const uint8_t *data, size_t len, uint8_t *out32);
+  static void hmacSha256(const uint8_t *key, size_t keyLen, const uint8_t *data, size_t dataLen, uint8_t *out32);
+
+  // ECDH & AES-256-CBC for CTAP2 PIN Protocol 1
+  static bool computeSharedSecret(
+    const std::vector<uint8_t> &privKey,
+    const std::vector<uint8_t> &peerPubX,
+    const std::vector<uint8_t> &peerPubY,
+    std::vector<uint8_t> &outSharedKey32
+  );
+
+  static bool aes256CbcDecrypt(
+    const uint8_t *key32,
+    const uint8_t *iv16,
+    const uint8_t *input,
+    size_t len,
+    std::vector<uint8_t> &output
+  );
+
+  static bool aes256CbcEncrypt(
+    const uint8_t *key32,
+    const uint8_t *iv16,
+    const uint8_t *input,
+    size_t len,
+    std::vector<uint8_t> &output
+  );
+
+  // PIN Storage & Verification
+  static bool isPinSet();
+  static bool setPin(const uint8_t *decryptedPin64, size_t pinLen);
+  static bool changePin(const uint8_t *oldPin64, size_t oldLen, const uint8_t *newPin64, size_t newLen);
+  static bool verifyPinHash(const uint8_t *pinHash16);
+  static uint8_t getPinRetries();
+  static void decrementPinRetries();
+  static void resetPinRetries();
+  static void clearPin();
+
+  static void getPinToken(uint8_t *out32);
+  static bool verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pinAuth16);
 };
+
