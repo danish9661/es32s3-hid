@@ -9,6 +9,7 @@
 #include <Update.h>
 #include <ESPmDNS.h>
 #include "USB.h"
+#include "USBMSC.h"
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
 #include "USBHIDConsumerControl.h"
@@ -180,22 +181,36 @@ int lineDelayMs = 40;
 int ledBrightness = 50;
 int kvmMouseSmoothness = 100;
 
+bool usbMscEnabled = true;
+String usbMscVolumeLabel = "DUCKY_DRIVE";
+
+constexpr size_t MSC_SECTOR_SIZE = 512;
+constexpr size_t MSC_SECTOR_COUNT = 4096; // 2 MB
+constexpr size_t MSC_DISK_SIZE = MSC_SECTOR_COUNT * MSC_SECTOR_SIZE;
+
 // --- RUNTIME OBJECTS ---
 USBHIDKeyboard Keyboard;
 USBHIDMouse Mouse;
 USBHIDConsumerControl Consumer;
+USBMSC MSC;
 AsyncWebServer server(80);
 Adafruit_NeoPixel pixels(NUMPIXELS, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP kvmUdp;
 
 char *psramBuffer = nullptr;
 size_t bufferIndex = 0;
+uint8_t *mscDiskBuffer = nullptr;
 
 volatile bool isWorkerBusy = false;
 volatile bool stopScriptFlag = false;
 volatile bool isJobQueued = false;
 volatile bool isInputLocked = false;
 volatile uint32_t inputLockTimestamp = 0;
+
+volatile size_t scriptCurrentLine = 0;
+volatile size_t scriptTotalLines = 0;
+volatile uint8_t scriptProgressPercent = 0;
+String scriptCurrentCommand = "";
 
 String activeSessionToken = "";
 IPAddress activeSessionIp;
@@ -223,6 +238,8 @@ enum : uint8_t {
   JOB_RAW_TEXT = 1,
   JOB_ACTION_FILE = 2,
 };
+
+uint8_t parseMouseButton(const String &name);
 
 enum class HidRealtimeType : uint8_t {
   KeyTap,
@@ -328,6 +345,132 @@ int16_t scaleMouseDelta(int16_t value, int percent) {
   if (scaled > 32767) scaled = 32767;
   if (scaled < -32768) scaled = -32768;
   return static_cast<int16_t>(scaled);
+}
+
+// --- USB MSC DISK HANDLERS ---
+static int32_t onMscRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
+  if (!mscDiskBuffer || lba >= MSC_SECTOR_COUNT) return -1;
+  uint32_t srcOffset = (lba * MSC_SECTOR_SIZE) + offset;
+  if (srcOffset + bufsize > MSC_DISK_SIZE) return -1;
+  memcpy(buffer, mscDiskBuffer + srcOffset, bufsize);
+  return bufsize;
+}
+
+static int32_t onMscWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
+  if (!mscDiskBuffer || lba >= MSC_SECTOR_COUNT) return -1;
+  uint32_t dstOffset = (lba * MSC_SECTOR_SIZE) + offset;
+  if (dstOffset + bufsize > MSC_DISK_SIZE) return -1;
+  memcpy(mscDiskBuffer + dstOffset, buffer, bufsize);
+  return bufsize;
+}
+
+static bool onMscStartStop(uint8_t power_condition, bool start, bool load_eject) {
+  return true;
+}
+
+void initVirtualFatDisk() {
+  if (!mscDiskBuffer) return;
+  memset(mscDiskBuffer, 0, MSC_DISK_SIZE);
+
+  uint8_t *bs = mscDiskBuffer;
+  bs[0] = 0xEB; bs[1] = 0x3C; bs[2] = 0x90;
+  memcpy(bs + 3, "MSWIN4.1", 8);
+  bs[11] = 0x00; bs[12] = 0x02; // 512 bytes/sector
+  bs[13] = 0x01;               // 1 sector/cluster
+  bs[14] = 0x01; bs[15] = 0x00; // 1 reserved sector
+  bs[16] = 0x02;               // 2 FATs
+  bs[17] = 0x80; bs[18] = 0x00; // 128 root entries (8 sectors)
+  bs[19] = 0x00; bs[20] = 0x10; // 4096 sectors (2 MB)
+  bs[21] = 0xF8;               // Media descriptor
+  bs[22] = 0x0C; bs[23] = 0x00; // 12 sectors/FAT
+  bs[24] = 0x20; bs[25] = 0x00; // 32 sectors/track
+  bs[26] = 0x40; bs[27] = 0x00; // 64 heads
+  bs[28] = 0x00; bs[29] = 0x00; bs[30] = 0x00; bs[31] = 0x00;
+  bs[36] = 0x80;
+  bs[38] = 0x29;
+  bs[39] = 0x75; bs[40] = 0x10; bs[41] = 0x96; bs[42] = 0x61;
+  memcpy(bs + 43, "DUCKY_DRIVE", 11);
+  memcpy(bs + 54, "FAT12   ", 8);
+  bs[510] = 0x55; bs[511] = 0xAA;
+
+  uint8_t *fat1 = mscDiskBuffer + (1 * 512);
+  uint8_t *fat2 = mscDiskBuffer + (13 * 512);
+  fat1[0] = 0xF8; fat1[1] = 0xFF; fat1[2] = 0xFF;
+  fat2[0] = 0xF8; fat2[1] = 0xFF; fat2[2] = 0xFF;
+
+  uint8_t *rootDir = mscDiskBuffer + (25 * 512);
+  memcpy(rootDir + 0, "DUCKY_DRIVE", 11);
+  rootDir[11] = 0x08;
+
+  auto addFat12File = [&](int dirIndex, const char *name83, const char *content, uint16_t cluster) {
+    uint8_t *entry = rootDir + (dirIndex * 32);
+    memcpy(entry, name83, 11);
+    entry[11] = 0x20;
+    entry[22] = 0x00; entry[23] = 0x50;
+    entry[24] = 0x2F; entry[25] = 0x5D;
+    entry[26] = static_cast<uint8_t>(cluster & 0xFF);
+    entry[27] = static_cast<uint8_t>((cluster >> 8) & 0xFF);
+    uint32_t len = strlen(content);
+    memcpy(entry + 28, &len, 4);
+
+    int fatOffset = (cluster * 3) / 2;
+    if (cluster % 2 == 0) {
+      fat1[fatOffset] = 0xFF;
+      fat1[fatOffset + 1] = (fat1[fatOffset + 1] & 0xF0) | 0x0F;
+      fat2[fatOffset] = 0xFF;
+      fat2[fatOffset + 1] = (fat2[fatOffset + 1] & 0xF0) | 0x0F;
+    } else {
+      fat1[fatOffset] = (fat1[fatOffset] & 0x0F) | 0xF0;
+      fat1[fatOffset + 1] = 0xFF;
+      fat2[fatOffset] = (fat2[fatOffset] & 0x0F) | 0xF0;
+      fat2[fatOffset + 1] = 0xFF;
+    }
+
+    uint32_t dataSector = 33 + (cluster - 2);
+    memcpy(mscDiskBuffer + (dataSector * 512), content, len);
+  };
+
+  const char *runBat = "@echo off\r\necho Executing Staged Payload...\r\npowershell -ExecutionPolicy Bypass -File payload.ps1\r\npause\r\n";
+  const char *payloadPs1 = "# ESP32-S3 HID Staged Payload\r\nWrite-Host \"[+] Running Staged Payload from ESP32-S3 MSC Drive\" -ForegroundColor Green\r\nGet-Date | Out-File -Append exfil.txt\r\n";
+  const char *readmeTxt = "ESP32-S3 HID Console - Virtual Mass Storage Drive\r\nUse this drive to store staged payloads or collect exfiltrated data.\r\n";
+
+  addFat12File(1, "RUN     BAT", runBat, 2);
+  addFat12File(2, "PAYLOAD PS1", payloadPs1, 3);
+  addFat12File(3, "README  TXT", readmeTxt, 4);
+}
+
+void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t clickAction = 0) {
+  xPct = clampInt(static_cast<int>(xPct * 10.0f), 0, 1000) / 10.0f;
+  yPct = clampInt(static_cast<int>(yPct * 10.0f), 0, 1000) / 10.0f;
+
+  for (int i = 0; i < 20; i++) {
+    Mouse.move(-127, -127, 0, 0);
+    delay(1);
+  }
+  delay(10);
+
+  int targetX = static_cast<int>((xPct / 100.0f) * 1920.0f);
+  int targetY = static_cast<int>((yPct / 100.0f) * 1080.0f);
+
+  while (targetX > 0 || targetY > 0) {
+    int8_t stepX = static_cast<int8_t>(clampInt(targetX, 0, 120));
+    int8_t stepY = static_cast<int8_t>(clampInt(targetY, 0, 120));
+    Mouse.move(stepX, stepY, 0, 0);
+    targetX -= stepX;
+    targetY -= stepY;
+    if (targetX > 0 || targetY > 0) delay(1);
+  }
+
+  if (clickButton != 0) {
+    delay(15);
+    if (clickAction == MOUSE_ACTION_DOWN) {
+      Mouse.press(clickButton);
+    } else if (clickAction == MOUSE_ACTION_UP) {
+      Mouse.release(clickButton);
+    } else {
+      Mouse.click(clickButton);
+    }
+  }
 }
 
 bool parseUint16String(const String &raw, uint16_t &out) {
@@ -782,6 +925,8 @@ void persistSettings() {
   out["usb_pid"] = usbProductId;
   out["usb_vendor_name"] = usbVendorName;
   out["usb_product_name"] = usbProductName;
+  out["usb_msc_enabled"] = usbMscEnabled;
+  out["usb_msc_label"] = usbMscVolumeLabel;
 
   out["delay"] = typeDelay;
   out["burst_chars"] = burstChars;
@@ -847,6 +992,8 @@ void loadSettings() {
   }
   if (doc.containsKey("usb_vendor_name")) usbVendorName = doc["usb_vendor_name"].as<String>();
   if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
+  if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
+  if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
 
   usbVendorName.trim();
   usbProductName.trim();
@@ -879,6 +1026,7 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
   uint16_t oldUsbPid = usbProductId;
   String oldUsbVendorName = usbVendorName;
   String oldUsbProductName = usbProductName;
+  bool oldUsbMscEnabled = usbMscEnabled;
 
   if (doc.containsKey("ap_ssid")) ap_ssid = doc["ap_ssid"].as<String>();
   if (doc.containsKey("ap_pass")) {
@@ -948,6 +1096,15 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged) {
     String v = doc["usb_product_name"].as<String>();
     v.trim();
     if (v.length() >= 1 && v.length() <= 48) usbProductName = v;
+  }
+
+  if (doc.containsKey("usb_msc_enabled")) {
+    usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
+  }
+  if (doc.containsKey("usb_msc_label")) {
+    String lbl = doc["usb_msc_label"].as<String>();
+    lbl.trim();
+    if (!lbl.isEmpty() && lbl.length() <= 11) usbMscVolumeLabel = lbl;
   }
 
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 40);
@@ -1120,12 +1277,19 @@ void typeTextInternal(size_t startIndex, size_t length) {
 
   int sincePause = 0;
   for (size_t i = 0; i < safeLength; i++) {
-    if (stopScriptFlag) return;
+    if (stopScriptFlag) {
+      scriptProgressPercent = 0;
+      return;
+    }
 
     char c = psramBuffer[startIndex + i];
     Keyboard.write(static_cast<uint8_t>(c));
 
     if (charDelay > 0) delay(charDelay);
+
+    if (i % 24 == 0 && safeLength > 0) {
+      scriptProgressPercent = static_cast<uint8_t>((i * 100) / safeLength);
+    }
 
     sincePause++;
     if (c == '\n' || c == '\r') {
@@ -1137,6 +1301,7 @@ void typeTextInternal(size_t startIndex, size_t length) {
       vTaskDelay(1);
     }
   }
+  scriptProgressPercent = 0;
 }
 
 String readLineRange(size_t lineStart, size_t lineEnd) {
@@ -1247,6 +1412,28 @@ bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
   } else if (upper.startsWith("DELAY ")) {
     int d = trimmed.substring(6).toInt();
     if (d > 0) delay(d);
+  } else if (upper.startsWith("MOUSE_MOVE_ABS ") || upper.startsWith("MOUSEMOVEABS ")) {
+    String args = trimmed.substring(trimmed.indexOf(' ') + 1);
+    args.trim();
+    int sp = args.indexOf(' ');
+    if (sp > 0) {
+      float x = args.substring(0, sp).toFloat();
+      float y = args.substring(sp + 1).toFloat();
+      mouseMoveAbsolute(x, y);
+    }
+  } else if (upper.startsWith("MOUSE_CLICK_ABS ") || upper.startsWith("MOUSECLICKABS ")) {
+    String args = trimmed.substring(trimmed.indexOf(' ') + 1);
+    args.trim();
+    int sp1 = args.indexOf(' ');
+    if (sp1 > 0) {
+      String btn = args.substring(0, sp1);
+      int sp2 = args.indexOf(' ', sp1 + 1);
+      if (sp2 > 0) {
+        float x = args.substring(sp1 + 1, sp2).toFloat();
+        float y = args.substring(sp2 + 1).toFloat();
+        mouseMoveAbsolute(x, y, parseMouseButton(btn), MOUSE_ACTION_CLICK);
+      }
+    }
   } else {
     String normalized = trimmed;
     for (size_t k = 0; k < normalized.length(); k++) {
@@ -1287,6 +1474,10 @@ bool executeDuckyCommandLine(const String &rawLine, int defaultDelay) {
         uint8_t k = resolveDuckyKey(token);
         if (k != 0) {
           targetKey = k;
+        } else if (token.length() == 1) {
+          char c = token[0];
+          if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+          targetKey = static_cast<uint8_t>(c);
         }
       }
     }
@@ -1317,6 +1508,16 @@ void parseAndExecuteInternal(size_t totalLength) {
   int lineCounter = 0;
   String lastExecutableLine = "";
 
+  scriptTotalLines = 0;
+  for (size_t c = 0; c < totalLength; c++) {
+    if (psramBuffer[c] == '\n') scriptTotalLines++;
+  }
+  if (totalLength > 0 && psramBuffer[totalLength - 1] != '\n') scriptTotalLines++;
+  if (scriptTotalLines == 0) scriptTotalLines = 1;
+  scriptCurrentLine = 0;
+  scriptProgressPercent = 0;
+  scriptCurrentCommand = "";
+
   while (i < totalLength) {
     if (stopScriptFlag) break;
 
@@ -1327,6 +1528,10 @@ void parseAndExecuteInternal(size_t totalLength) {
     String rawLine = readLineRange(lineStart, lineEnd);
     String trimmed = rawLine;
     trimmed.trim();
+
+    scriptCurrentLine++;
+    scriptProgressPercent = static_cast<uint8_t>(clampInt(static_cast<int>((scriptCurrentLine * 100) / scriptTotalLines), 0, 100));
+    scriptCurrentCommand = trimmed.substring(0, 48);
 
     if (trimmed.isEmpty()) continue;
 
@@ -1396,6 +1601,10 @@ void parseAndExecuteInternal(size_t totalLength) {
       vTaskDelay(1);
     }
   }
+
+  scriptCurrentLine = 0;
+  scriptProgressPercent = 0;
+  scriptCurrentCommand = "";
 }
 
 bool queueJob(size_t length, bool isRawText) {
@@ -1818,6 +2027,11 @@ String jsonStatus() {
   String staIp = staConnected ? WiFi.localIP().toString() : "";
   String apIp = WiFi.softAPIP().toString();
 
+  String safeCmd = scriptCurrentCommand;
+  safeCmd.replace("\"", "\\\"");
+  safeCmd.replace("\r", "");
+  safeCmd.replace("\n", " ");
+
   String json = "{";
   json += "\"busy\":" + String(isWorkerBusy ? "true" : "false");
   json += ",\"queued\":" + String(isJobQueued ? "true" : "false");
@@ -1828,6 +2042,11 @@ String jsonStatus() {
   json += ",\"ap_ip\":\"" + apIp + "\"";
   json += ",\"sta_rssi\":" + String(staConnected ? WiFi.RSSI() : 0);
   json += ",\"mdns_host\":\"http://esp32-hid.local\"";
+  json += ",\"line_current\":" + String(scriptCurrentLine);
+  json += ",\"line_total\":" + String(scriptTotalLines);
+  json += ",\"progress\":" + String(scriptProgressPercent);
+  json += ",\"current_cmd\":\"" + safeCmd + "\"";
+  json += ",\"msc_enabled\":" + String(usbMscEnabled ? "true" : "false");
   json += "}";
   return json;
 }
@@ -2691,6 +2910,44 @@ void registerRoutes() {
   );
 
   server.on(
+    "/api/mouse_move_abs",
+    HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!requireAuth(request)) return;
+    },
+    nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!hasAccess(request)) return;
+      if (index + len != total) return;
+
+      if (isWorkerBusy || isJobQueued) {
+        request->send(503, "application/json", "{\"error\":\"busy\"}");
+        return;
+      }
+
+      DynamicJsonDocument doc(256);
+      DeserializationError err = deserializeJson(doc, data, len);
+      if (err) {
+        request->send(400, "application/json", "{\"error\":\"invalid-json\"}");
+        return;
+      }
+
+      float x = doc["x"] | 50.0f;
+      float y = doc["y"] | 50.0f;
+      String btnStr = doc["button"] | "";
+      String actStr = doc["action"] | "click";
+
+      uint8_t btn = parseMouseButton(btnStr);
+      uint8_t act = MOUSE_ACTION_CLICK;
+      if (actStr == "down") act = MOUSE_ACTION_DOWN;
+      else if (actStr == "up") act = MOUSE_ACTION_UP;
+
+      mouseMoveAbsolute(x, y, btn, act);
+      request->send(200, "application/json", "{\"ok\":true}");
+    }
+  );
+
+  server.on(
     "/api/mouse_scroll",
     HTTP_POST,
     [](AsyncWebServerRequest *request) {
@@ -3067,6 +3324,8 @@ void registerRoutes() {
     doc["usb_pid"] = usbProductId;
     doc["usb_vendor_name"] = usbVendorName;
     doc["usb_product_name"] = usbProductName;
+    doc["usb_msc_enabled"] = usbMscEnabled;
+    doc["usb_msc_label"] = usbMscVolumeLabel;
 
     doc["delay"] = typeDelay;
     doc["burst_chars"] = burstChars;
@@ -3216,6 +3475,21 @@ void setup() {
     Serial.println("PSRAM allocation failed");
     setStatus(255, 0, 0);
     while (true) delay(1000);
+  }
+
+  mscDiskBuffer = static_cast<uint8_t *>(heap_caps_malloc(MSC_DISK_SIZE, MALLOC_CAP_SPIRAM));
+  if (mscDiskBuffer) {
+    initVirtualFatDisk();
+    if (usbMscEnabled) {
+      MSC.vendorID(usbVendorName.c_str());
+      MSC.productID(usbMscVolumeLabel.c_str());
+      MSC.productRevision("1.0");
+      MSC.onRead(onMscRead);
+      MSC.onWrite(onMscWrite);
+      MSC.onStartStop(onMscStartStop);
+      MSC.mediaPresent(true);
+      MSC.begin(MSC_SECTOR_COUNT, MSC_SECTOR_SIZE);
+    }
   }
 
   USB.VID(usbVendorId);

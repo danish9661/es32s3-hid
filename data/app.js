@@ -415,6 +415,30 @@ function updateNetworkInfo(d) {
   }
 }
 
+function updateScriptProgress(d) {
+  const box = qs("script-progress-box");
+  const bar = qs("script-progress-bar");
+  const text = qs("script-progress-text");
+  const cmd = qs("script-progress-cmd");
+  if (!box || !bar || !text || !cmd) return;
+
+  const busy = Boolean(d.busy || d.queued);
+  if (busy && (d.line_total > 0 || d.progress > 0)) {
+    box.classList.remove("hidden");
+    const pct = d.progress || 0;
+    bar.style.width = pct + "%";
+    if (d.line_total > 0) {
+      text.textContent = `Executing line ${d.line_current || 0}/${d.line_total} (${pct}%)`;
+    } else {
+      text.textContent = `Typing in progress (${pct}%)`;
+    }
+    cmd.textContent = d.current_cmd ? d.current_cmd : "";
+  } else if (!busy) {
+    box.classList.add("hidden");
+    bar.style.width = "0%";
+  }
+}
+
 async function refreshStatus() {
   try {
     const res = await api("/api/status");
@@ -422,6 +446,7 @@ async function refreshStatus() {
     const data = await res.json();
     updateRunBadge(Boolean(data.busy || data.queued));
     updateNetworkInfo(data);
+    updateScriptProgress(data);
   } catch (_) {}
 }
 
@@ -1273,6 +1298,231 @@ function bindTrackpad() {
     } catch (_) {
       setText("mouse-status", "Failed to release buttons.");
     }
+  });
+}
+
+let absCoords = { x: 50.0, y: 50.0 };
+
+function bindAbsoluteMouse() {
+  const modeRelBtn = qs("mouse-mode-rel");
+  const modeAbsBtn = qs("mouse-mode-abs");
+  const trackpad = qs("trackpad");
+  const absContainer = qs("abs-mouse-container");
+  const modeDesc = qs("mouse-mode-desc");
+  const absCanvas = qs("abs-canvas");
+  const crosshair = qs("abs-crosshair");
+  const coordText = qs("abs-coord-text");
+
+  if (!modeRelBtn || !modeAbsBtn || !trackpad || !absContainer) return;
+
+  modeRelBtn.addEventListener("click", () => {
+    modeRelBtn.className = "btn-primary btn-sm";
+    modeAbsBtn.className = "btn-outline btn-sm";
+    trackpad.classList.remove("hidden");
+    absContainer.classList.add("hidden");
+    if (modeDesc) modeDesc.textContent = "Use trackpad area for relative pointer movement. Two-finger drag sends vertical scrolling.";
+  });
+
+  modeAbsBtn.addEventListener("click", () => {
+    modeAbsBtn.className = "btn-primary btn-sm";
+    modeRelBtn.className = "btn-outline btn-sm";
+    trackpad.classList.add("hidden");
+    absContainer.classList.remove("hidden");
+    if (modeDesc) modeDesc.textContent = "Click or drag on the canvas to set absolute pointer screen coordinates (0% to 100%).";
+  });
+
+  const updateCrosshair = (event) => {
+    if (!absCanvas || !crosshair) return;
+    const rect = absCanvas.getBoundingClientRect();
+    let x = ((event.clientX - rect.left) / rect.width) * 100.0;
+    let y = ((event.clientY - rect.top) / rect.height) * 100.0;
+    x = Math.max(0, Math.min(100, x));
+    y = Math.max(0, Math.min(100, y));
+    absCoords.x = Math.round(x * 10) / 10;
+    absCoords.y = Math.round(y * 10) / 10;
+
+    crosshair.style.left = absCoords.x + "%";
+    crosshair.style.top = absCoords.y + "%";
+    if (coordText) coordText.textContent = `X: ${absCoords.x.toFixed(1)}%, Y: ${absCoords.y.toFixed(1)}%`;
+  };
+
+  let isDraggingAbs = false;
+  absCanvas?.addEventListener("pointerdown", (e) => {
+    isDraggingAbs = true;
+    absCanvas.setPointerCapture(e.pointerId);
+    updateCrosshair(e);
+  });
+  absCanvas?.addEventListener("pointermove", (e) => {
+    if (isDraggingAbs) updateCrosshair(e);
+  });
+  const endAbsDrag = (e) => {
+    if (isDraggingAbs) {
+      isDraggingAbs = false;
+      updateCrosshair(e);
+    }
+  };
+  absCanvas?.addEventListener("pointerup", endAbsDrag);
+  absCanvas?.addEventListener("pointercancel", endAbsDrag);
+
+  async function sendAbsMove(action = "none", button = "") {
+    try {
+      setText("mouse-status", "Moving absolute...");
+      const res = await api("/api/mouse_move_abs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          x: absCoords.x,
+          y: absCoords.y,
+          button: button,
+          action: action,
+        }),
+      });
+      if (!res.ok) throw new Error();
+      setText("mouse-status", `Moved to (${absCoords.x}%, ${absCoords.y}%)${button ? " and clicked " + button : ""}.`);
+    } catch (_) {
+      setText("mouse-status", "Absolute mouse command failed.");
+    }
+  }
+
+  qs("abs-move-btn")?.addEventListener("click", () => sendAbsMove("none", ""));
+  qs("abs-click-btn")?.addEventListener("click", () => sendAbsMove("click", "left"));
+  qs("abs-rclick-btn")?.addEventListener("click", () => sendAbsMove("click", "right"));
+}
+
+let selectedOtaFile = null;
+
+function bindOtaControls() {
+  const dropzone = qs("ota-dropzone");
+  const fileInput = qs("ota-file-input");
+  const browseBtn = qs("ota-browse-btn");
+  const flashBtn = qs("ota-flash-btn");
+  const prompt = qs("ota-dropzone-prompt");
+  const fileInfo = qs("ota-file-info");
+  const filenameSpan = qs("ota-filename");
+  const filesizeSpan = qs("ota-filesize");
+  const progressBox = qs("ota-progress-box");
+  const progressBar = qs("ota-progress-bar");
+  const progressText = qs("ota-progress-text");
+  const speedText = qs("ota-speed-text");
+  const statusSpan = qs("ota-status");
+  const modeBadge = qs("ota-mode-badge");
+
+  if (!dropzone || !fileInput || !flashBtn) return;
+
+  const updateTypeBadge = () => {
+    const type = document.querySelector('input[name="ota-type"]:checked')?.value || "firmware";
+    if (modeBadge) modeBadge.textContent = (type === "littlefs") ? "Filesystem" : "Firmware";
+  };
+
+  document.querySelectorAll('input[name="ota-type"]').forEach((radio) => {
+    radio.addEventListener("change", updateTypeBadge);
+  });
+
+  const selectFile = (file) => {
+    if (!file) return;
+    if (!file.name.endsWith(".bin")) {
+      if (statusSpan) statusSpan.textContent = "Please select a valid .bin file.";
+      return;
+    }
+    selectedOtaFile = file;
+    if (filenameSpan) filenameSpan.textContent = file.name;
+    if (filesizeSpan) filesizeSpan.textContent = `(${(file.size / 1024).toFixed(1)} KB)`;
+    if (prompt) prompt.classList.add("hidden");
+    if (fileInfo) fileInfo.classList.remove("hidden");
+    flashBtn.disabled = false;
+    if (statusSpan) statusSpan.textContent = "Ready to flash.";
+
+    if (file.name.toLowerCase().includes("littlefs") || file.name.toLowerCase().includes("spiffs")) {
+      const fsRadio = document.querySelector('input[name="ota-type"][value="littlefs"]');
+      if (fsRadio) { fsRadio.checked = true; updateTypeBadge(); }
+    } else if (file.name.toLowerCase().includes("firmware")) {
+      const fwRadio = document.querySelector('input[name="ota-type"][value="firmware"]');
+      if (fwRadio) { fwRadio.checked = true; updateTypeBadge(); }
+    }
+  };
+
+  browseBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+  dropzone.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", (e) => {
+    if (e.target.files && e.target.files[0]) {
+      selectFile(e.target.files[0]);
+    }
+  });
+
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("drag-over");
+  });
+  dropzone.addEventListener("dragleave", () => {
+    dropzone.classList.remove("drag-over");
+  });
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("drag-over");
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      selectFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  flashBtn.addEventListener("click", () => {
+    if (!selectedOtaFile) return;
+
+    const isFs = (document.querySelector('input[name="ota-type"]:checked')?.value === "littlefs");
+    const targetUrl = isFs ? "/api/ota?type=littlefs" : "/api/ota";
+
+    flashBtn.disabled = true;
+    if (progressBox) progressBox.classList.remove("hidden");
+    if (progressBar) progressBar.style.width = "0%";
+    if (statusSpan) statusSpan.textContent = "Uploading update to ESP32-S3...";
+
+    const startTime = Date.now();
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", targetUrl, true);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        if (progressBar) progressBar.style.width = pct + "%";
+        const elapsedSec = Math.max((Date.now() - startTime) / 1000, 0.1);
+        const speedKB = Math.round((e.loaded / 1024) / elapsedSec);
+        if (progressText) progressText.textContent = `Flashing: ${pct}% (${(e.loaded / 1024).toFixed(0)} / ${(e.total / 1024).toFixed(0)} KB)`;
+        if (speedText) speedText.textContent = `${speedKB} KB/s`;
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        if (progressBar) progressBar.style.width = "100%";
+        if (progressText) progressText.textContent = "Flash Complete! Rebooting...";
+        if (statusSpan) statusSpan.textContent = "Device is rebooting. Reconnecting in 6 seconds...";
+
+        let countdown = 6;
+        const countTimer = setInterval(() => {
+          countdown--;
+          if (statusSpan) statusSpan.textContent = `Rebooting... refreshing in ${countdown}s`;
+          if (countdown <= 0) {
+            clearInterval(countTimer);
+            window.location.reload();
+          }
+        }, 1000);
+      } else {
+        flashBtn.disabled = false;
+        if (statusSpan) statusSpan.textContent = "OTA Update failed. Check binary size and format.";
+      }
+    };
+
+    xhr.onerror = () => {
+      flashBtn.disabled = false;
+      if (statusSpan) statusSpan.textContent = "Network error during OTA upload.";
+    };
+
+    const formData = new FormData();
+    formData.append("file", selectedOtaFile, selectedOtaFile.name);
+    xhr.send(formData);
   });
 }
 
@@ -2128,6 +2378,17 @@ async function loadSettings() {
     qs("usb-vendor-id").value = formatHex16(d.usb_vid ?? 0x303A);
     qs("usb-product-id").value = formatHex16(d.usb_pid ?? 0x0002);
 
+    const mscCheck = qs("usb-msc-enabled");
+    const mscBadge = qs("usb-msc-status-badge");
+    if (mscCheck) {
+      mscCheck.checked = d.usb_msc_enabled ?? true;
+      if (mscBadge) {
+        mscBadge.textContent = mscCheck.checked ? "Enabled" : "Disabled";
+        mscBadge.className = mscCheck.checked ? "badge ok" : "badge";
+      }
+    }
+    if (qs("usb-msc-label")) qs("usb-msc-label").value = d.usb_msc_label || "DUCKY_DRIVE";
+
     if (typeof d.kvm_enabled === "boolean") qs("kvm-enabled").checked = d.kvm_enabled;
     if (d.kvm_port != null) qs("kvm-port").value = d.kvm_port;
     if (typeof d.kvm_allowed_ip === "string") qs("kvm-allowed-ip").value = d.kvm_allowed_ip;
@@ -2176,6 +2437,8 @@ async function saveSettings() {
     usb_product_name: qs("usb-product-name").value.trim(),
     usb_vid: usbVid,
     usb_pid: usbPid,
+    usb_msc_enabled: qs("usb-msc-enabled") ? qs("usb-msc-enabled").checked : true,
+    usb_msc_label: qs("usb-msc-label") ? qs("usb-msc-label").value.trim() : "DUCKY_DRIVE",
 
     kvm_enabled: qs("kvm-enabled").checked,
     kvm_port: Math.trunc(clampNumber(qs("kvm-port").value, 1, 65535)),
@@ -2399,6 +2662,14 @@ function initEvents() {
   bindSliderReadout("line-delay", " ms");
   bindSliderReadout("kvm-mouse-smooth", "%");
 
+  qs("usb-msc-enabled")?.addEventListener("change", (e) => {
+    const mscBadge = qs("usb-msc-status-badge");
+    if (mscBadge) {
+      mscBadge.textContent = e.target.checked ? "Enabled" : "Disabled";
+      mscBadge.className = e.target.checked ? "badge ok" : "badge";
+    }
+  });
+
   qs("refresh-net-btn").addEventListener("click", () => {
     loadSettings();
     refreshStatus();
@@ -2437,6 +2708,8 @@ async function bootstrap() {
   renderKeyboard65();
   bindModifierLocks();
   bindTrackpad();
+  bindAbsoluteMouse();
+  bindOtaControls();
   bindKeyboardPreferenceControls();
   startMouseFlushLoop();
 

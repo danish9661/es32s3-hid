@@ -139,6 +139,8 @@ The onboard interpreter executes scripts from the web editor or directly from `/
 | `DEFAULT_DELAY <ms>` | Sets delay between every subsequent command | `DEFAULT_DELAY 50` |
 | `REPEAT <n>` | Repeats the previous command $n$ times | `REPEAT 5` |
 | `BLOCK` ... `ENDBLOCK` | Injects raw text block at maximum throughput | `BLOCK`<br>`Multi-line script`<br>`ENDBLOCK` |
+| `MOUSE_MOVE_ABS <x%> <y%>` | Moves cursor to exact screen percentage ($0..100\%$) | `MOUSE_MOVE_ABS 50 50` |
+| `MOUSE_CLICK_ABS <btn> <x%> <y%>` | Moves and clicks at exact screen percentage | `MOUSE_CLICK_ABS left 50 50` |
 
 ### Special & Navigation Keys
 - `ENTER` / `RETURN`

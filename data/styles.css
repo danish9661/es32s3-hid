@@ -708,3 +708,171 @@ select.input {
   font-size: 0.76rem;
   color: var(--muted);
 }
+
+/* Script Execution Progress Bar */
+.script-progress-box {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  background: rgba(20, 34, 39, 0.85);
+  border: 1px solid rgba(68, 192, 138, 0.35);
+  border-radius: var(--radius-sm);
+  animation: fadeIn 0.2s ease;
+}
+
+.progress-bar-wrap {
+  width: 100%;
+  height: 8px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-bar-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #44c08a, #ffb347);
+  border-radius: 4px;
+  transition: width 0.15s ease-out;
+}
+
+.progress-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 0.82rem;
+}
+
+.cmd-text {
+  font-family: monospace;
+  color: var(--accent-2);
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Absolute Mouse Stylus Canvas */
+.mouse-mode-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.abs-mouse-container {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.abs-canvas-wrap {
+  width: 100%;
+  max-width: 680px;
+  aspect-ratio: 16 / 9;
+  background: #091013;
+  border: 2px dashed var(--line);
+  border-radius: var(--radius-sm);
+  position: relative;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.abs-canvas {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.abs-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 8px rgba(255, 138, 43, 0.6);
+}
+
+.abs-crosshair::before,
+.abs-crosshair::after {
+  content: "";
+  position: absolute;
+  background: var(--accent);
+}
+
+.abs-crosshair::before {
+  top: -6px; left: 6px; width: 2px; height: 26px;
+}
+
+.abs-crosshair::after {
+  top: 6px; left: -6px; width: 26px; height: 2px;
+}
+
+.abs-grid-overlay span {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.35);
+  font-family: monospace;
+  pointer-events: none;
+}
+
+.abs-coord-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Web OTA Drag & Drop Card */
+.ota-card {
+  border-color: rgba(255, 138, 43, 0.3);
+}
+
+.ota-type-selector {
+  display: flex;
+  gap: 20px;
+  margin: 12px 0;
+}
+
+.radio-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.ota-dropzone {
+  border: 2px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 24px;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.ota-dropzone.drag-over {
+  border-color: var(--accent);
+  background: rgba(255, 138, 43, 0.1);
+}
+
+.ota-file-info {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  font-family: monospace;
+  color: #44c08a;
+  font-size: 1rem;
+}
+
+.ota-progress-box {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: var(--radius-sm);
+}

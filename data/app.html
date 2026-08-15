@@ -45,6 +45,15 @@
             <button id="download-btn" class="btn-outline">Download</button>
             <span id="current-file" class="editor-meta">No file selected</span>
           </div>
+          <div id="script-progress-box" class="script-progress-box hidden">
+            <div class="progress-bar-wrap">
+              <div id="script-progress-bar" class="progress-bar-fill"></div>
+            </div>
+            <div class="progress-labels">
+              <span id="script-progress-text">Executing line 0/0 (0%)</span>
+              <span id="script-progress-cmd" class="cmd-text"></span>
+            </div>
+          </div>
           <textarea id="code-area" spellcheck="false" placeholder="Write Ducky Script here..."></textarea>
           <div id="editor-status" class="status-line">Ready.</div>
         </section>
@@ -286,10 +295,36 @@
 
       <section id="view-mouse" class="view">
         <div class="panel mouse-box">
-          <h2>Mouse</h2>
-          <p class="small">Use the trackpad area for pointer movement. Two-finger drag tries to send vertical scrolling.</p>
+          <div class="network-head">
+            <h2>Mouse & Pointer Control</h2>
+            <div class="mouse-mode-toggle">
+              <button id="mouse-mode-rel" class="btn-primary btn-sm">Relative Trackpad</button>
+              <button id="mouse-mode-abs" class="btn-outline btn-sm">Absolute Mode (Stylus)</button>
+            </div>
+          </div>
+          <p class="small" id="mouse-mode-desc">Use trackpad area for relative pointer movement. Two-finger drag sends vertical scrolling.</p>
 
           <div id="trackpad" class="trackpad">Trackpad Area</div>
+
+          <div id="abs-mouse-container" class="abs-mouse-container hidden">
+            <div class="abs-canvas-wrap">
+              <div id="abs-canvas" class="abs-canvas">
+                <div id="abs-crosshair" class="abs-crosshair"></div>
+                <div class="abs-grid-overlay">
+                  <span style="position:absolute; top:6px; left:8px;">(0%, 0%)</span>
+                  <span style="position:absolute; top:6px; right:8px;">(100%, 0%)</span>
+                  <span style="position:absolute; bottom:6px; left:8px;">(0%, 100%)</span>
+                  <span style="position:absolute; bottom:6px; right:8px;">(100%, 100%)</span>
+                </div>
+              </div>
+            </div>
+            <div class="abs-coord-row">
+              <span>Target: <strong id="abs-coord-text">X: 50.0%, Y: 50.0%</strong></span>
+              <button id="abs-move-btn" class="btn-outline btn-sm">Move Pointer</button>
+              <button id="abs-click-btn" class="btn-primary btn-sm">Move & Left Click</button>
+              <button id="abs-rclick-btn" class="btn-outline btn-sm">Right Click</button>
+            </div>
+          </div>
 
           <div class="toolbar" style="margin-top:12px;">
             <button id="mouse-left-btn">Left Click</button>
@@ -487,7 +522,77 @@
           </div>
           <p class="small">You can pick a preset and edit values, or choose custom vendor ID/name. Save settings and reboot to apply.</p>
 
-          <div class="settings-actions">
+          <h3 style="margin-top:24px;">USB Mass Storage (BadUSB Flash Drive)</h3>
+          <div class="network-info-card">
+            <div class="network-head">
+              <h4>Virtual USB Drive (MSC) Configuration</h4>
+              <span id="usb-msc-status-badge" class="badge">Active</span>
+            </div>
+            <p class="small">When enabled, the ESP32 emulates a 2 MB virtual USB flash drive on the target PC for running staged offline payloads (e.g. <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>) and collecting exfiltrated data.</p>
+
+            <div class="settings-grid" style="margin-top:12px;">
+              <div>
+                <label class="checkbox-row" style="margin-top:8px;">
+                  <input id="usb-msc-enabled" type="checkbox">
+                  <span><strong>Enable Virtual USB Flash Drive (MSC)</strong></span>
+                </label>
+              </div>
+              <div>
+                <label class="label" for="usb-msc-label">Drive Volume Label (Max 11 Chars)</label>
+                <input class="input" id="usb-msc-label" type="text" placeholder="DUCKY_DRIVE" maxlength="11">
+              </div>
+            </div>
+            <p class="small" style="color:var(--muted); margin-top:8px;">Preloaded Files in PSRAM: <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>, <code>README.TXT</code>. (Requires Save Settings & Reboot to apply).</p>
+          </div>
+
+          <h3 style="margin-top:24px;">Web OTA Firmware & Filesystem Update</h3>
+          <div class="network-info-card ota-card">
+            <div class="network-head">
+              <h4>Flash ESP32-S3 over WiFi</h4>
+              <span id="ota-mode-badge" class="badge">Firmware</span>
+            </div>
+            <p class="small">Upload and flash compiled binaries (<code>firmware.bin</code> or <code>littlefs.bin</code>) directly from your browser without requiring a USB cable.</p>
+
+            <div class="ota-type-selector">
+              <label class="radio-inline">
+                <input type="radio" name="ota-type" value="firmware" checked>
+                <span><strong>Firmware Update</strong> (<code>firmware.bin</code>)</span>
+              </label>
+              <label class="radio-inline">
+                <input type="radio" name="ota-type" value="littlefs">
+                <span><strong>Web UI / Filesystem</strong> (<code>littlefs.bin</code>)</span>
+              </label>
+            </div>
+
+            <div id="ota-dropzone" class="ota-dropzone">
+              <input type="file" id="ota-file-input" accept=".bin" class="hidden">
+              <div id="ota-dropzone-prompt">
+                <div style="font-size:1.05rem; margin-bottom:6px;">Drag & drop <strong>.bin</strong> file here</div>
+                <button type="button" id="ota-browse-btn" class="btn-outline btn-sm">Select .bin File</button>
+              </div>
+              <div id="ota-file-info" class="ota-file-info hidden">
+                <span id="ota-filename">file.bin</span>
+                <span id="ota-filesize" class="small">(0 KB)</span>
+              </div>
+            </div>
+
+            <div id="ota-progress-box" class="ota-progress-box hidden">
+              <div class="progress-bar-wrap">
+                <div id="ota-progress-bar" class="progress-bar-fill"></div>
+              </div>
+              <div class="progress-labels">
+                <span id="ota-progress-text">Uploading: 0%</span>
+                <span id="ota-speed-text" class="cmd-text"></span>
+              </div>
+            </div>
+
+            <div class="ota-actions" style="margin-top:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+              <button id="ota-flash-btn" class="btn-primary" disabled>Upload & Flash Binary</button>
+              <span id="ota-status" class="small">Select a .bin file to begin.</span>
+            </div>
+          </div>
+
+          <div class="settings-actions" style="margin-top:24px;">
             <button id="save-settings-btn" class="btn-primary">Save Settings</button>
             <button id="reboot-btn" class="btn-danger">Reboot Device</button>
           </div>
