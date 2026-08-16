@@ -15,6 +15,7 @@
 #include "USBHIDMouse.h"
 #include "USBHIDConsumerControl.h"
 #include "USBHIDFIDO.h"
+#include "BLEFIDO.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_random.h"
@@ -233,6 +234,7 @@ int kvmMouseSmoothness = 100;
 bool usbMscEnabled = true;
 String usbMscVolumeLabel = "DUCKY_DRIVE";
 bool fidoSecurityKeyMode = false;
+bool bleFidoEnabled = false;
 
 constexpr size_t MSC_SECTOR_SIZE = 512;
 constexpr size_t MSC_SECTOR_COUNT = 4096; // 2 MB
@@ -1042,6 +1044,13 @@ void setStatus(uint8_t r, uint8_t g, uint8_t b) {
   pixels_alt.show();
 }
 
+void indicateRebootAndRestart(uint32_t delayMs = 450) {
+  // Dark Brown Visual Indicator for Reboot / Restart (RGB: 110, 35, 5)
+  setStatus(110, 35, 5);
+  delay(delayMs);
+  ESP.restart();
+}
+
 bool isPrivateIPv4(const IPAddress &ip) {
   if (ip[0] == 10) return true;
   if (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) return true;
@@ -1444,6 +1453,7 @@ void persistSettings() {
   out["usb_msc_enabled"] = usbMscEnabled;
   out["usb_msc_label"] = usbMscVolumeLabel;
   out["fido_mode"] = fidoSecurityKeyMode;
+  out["ble_fido_enabled"] = bleFidoEnabled;
 
   out["delay"] = typeDelay;
   out["burst_chars"] = burstChars;
@@ -1480,6 +1490,7 @@ void persistSettings() {
     prefs.putBool("usb_msc", usbMscEnabled);
     prefs.putString("usb_lbl", usbMscVolumeLabel);
     prefs.putBool("fido_mode", fidoSecurityKeyMode);
+    prefs.putBool("ble_fido", bleFidoEnabled);
     prefs.putInt("delay", typeDelay);
     prefs.putInt("burst_c", burstChars);
     prefs.putInt("burst_p", burstPauseMs);
@@ -1517,6 +1528,7 @@ bool loadSettingsNVS() {
   usbMscEnabled = prefs.getBool("usb_msc", usbMscEnabled);
   usbMscVolumeLabel = prefs.getString("usb_lbl", usbMscVolumeLabel);
   fidoSecurityKeyMode = prefs.getBool("fido_mode", fidoSecurityKeyMode);
+  bleFidoEnabled = prefs.getBool("ble_fido", bleFidoEnabled);
   typeDelay = prefs.getInt("delay", typeDelay);
   burstChars = prefs.getInt("burst_c", burstChars);
   burstPauseMs = prefs.getInt("burst_p", burstPauseMs);
@@ -1565,6 +1577,7 @@ void loadSettings() {
         if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
         if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
         if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
+        if (doc.containsKey("ble_fido_enabled")) bleFidoEnabled = doc["ble_fido_enabled"].as<bool>();
         if (doc.containsKey("fido_mode")) {
           fidoSecurityKeyMode = doc["fido_mode"].as<bool>();
         } else {
@@ -1707,6 +1720,11 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &w
     if (!lbl.isEmpty() && lbl.length() <= 11) usbMscVolumeLabel = lbl;
   }
 
+  bool oldBleFido = bleFidoEnabled;
+  if (doc.containsKey("ble_fido_enabled")) {
+    bleFidoEnabled = doc["ble_fido_enabled"].as<bool>();
+  }
+
   typeDelay = clampInt(doc["delay"] | typeDelay, 0, 200);
   burstChars = clampInt(doc["burst_chars"] | burstChars, 6, 96);
   burstPauseMs = clampInt(doc["burst_pause"] | burstPauseMs, 0, 120);
@@ -1724,7 +1742,8 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &w
     (oldUsbPid != usbProductId) ||
     (oldUsbVendorName != usbVendorName) ||
     (oldUsbProductName != usbProductName) ||
-    (oldUsbMscEnabled != usbMscEnabled);
+    (oldUsbMscEnabled != usbMscEnabled) ||
+    (oldBleFido != bleFidoEnabled);
 
   wifiChanged =
     (oldApSsid != ap_ssid) ||
@@ -2741,7 +2760,11 @@ String jsonStatus() {
 }
 
 void connectWiFi() {
-  WiFi.setSleep(false);
+  if (bleFidoEnabled) {
+    WiFi.setSleep(WIFI_PS_MIN_MODEM);
+  } else {
+    WiFi.setSleep(false);
+  }
   WiFi.setAutoReconnect(true);
   WiFi.setHostname("esp32-hid");
 
@@ -4015,6 +4038,8 @@ void registerRoutes() {
     doc["usb_product_name"] = usbProductName;
     doc["usb_msc_enabled"] = usbMscEnabled;
     doc["usb_msc_label"] = usbMscVolumeLabel;
+    doc["ble_fido_enabled"] = bleFidoEnabled;
+    doc["fido_mode"] = fidoSecurityKeyMode;
 
     doc["delay"] = typeDelay;
     doc["burst_chars"] = burstChars;
@@ -4114,8 +4139,7 @@ void registerRoutes() {
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     request->send(200, "application/json", "{\"rebooting\":true}");
-    delay(350);
-    ESP.restart();
+    indicateRebootAndRestart(400);
   });
 
   server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -4185,8 +4209,7 @@ void registerRoutes() {
       response->addHeader("Connection", "close");
       request->send(response);
       if (shouldReboot) {
-        delay(500);
-        ESP.restart();
+        indicateRebootAndRestart(500);
       }
     },
     [](AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
@@ -4621,8 +4644,7 @@ void registerRoutes() {
         prefs.end();
       }
       request->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
-      delay(300);
-      ESP.restart();
+      indicateRebootAndRestart(400);
     }
   );
 
@@ -4724,6 +4746,10 @@ void setup() {
   xTaskCreatePinnedToCore(hidRealtimeTask, "HidRealtime", 8192, nullptr, 2, nullptr, 0);
   xTaskCreatePinnedToCore(kvmNetworkTask, "KvmNetwork", 8192, nullptr, 2, nullptr, 0);
 
+  if (bleFidoEnabled) {
+    BleFido.begin("ESP32-S3 Passkey");
+  }
+
   connectWiFi();
   updateKvmUdpBinding();
   registerRoutes();
@@ -4743,10 +4769,11 @@ void checkPhysical2faTrigger() {
   static uint32_t lastPulse = 0;
   static bool pulseState = false;
 
-  // 1. FIDO2 / WebAuthn User Presence Touch Prompt
-  if (FIDO.isWaitingForTouch()) {
-    FIDO.checkTimeout();
-    FidoPendingAction act = FIDO.getPendingAction();
+  // 1. FIDO2 / WebAuthn User Presence Touch Prompt (Unified Engine for USB & BLE)
+  if (GlobalFidoEngine.isWaitingForTouch()) {
+    GlobalFidoEngine.checkTimeout();
+
+    FidoPendingAction act = GlobalFidoEngine.getPendingAction();
     uint32_t interval = (act == FIDO_ACTION_RESET) ? 120 : 160;
 
     // High-visibility rapid blinking with distinct Neon color per operation
@@ -4779,14 +4806,11 @@ void checkPhysical2faTrigger() {
       fidoSecurityKeyMode = !fidoSecurityKeyMode;
       persistSettings();
       if (fidoSecurityKeyMode) {
-        setStatus(0, 180, 255); // Neon Cyan
         logSystem("[MODE] Switching to Dedicated FIDO2 Passkey Mode... Rebooting");
       } else {
-        setStatus(0, 255, 0); // Green
         logSystem("[MODE] Switching to Normal HID/Ducky Mode... Rebooting");
       }
-      delay(400);
-      ESP.restart();
+      indicateRebootAndRestart(500);
       return;
     }
   } else {
@@ -4795,9 +4819,9 @@ void checkPhysical2faTrigger() {
       btnPressStart = 0;
       if (pressDuration < 2000) {
         // Short press: FIDO touch confirmation or Vault TOTP type
-        if (FIDO.isWaitingForTouch()) {
-          String rp = FIDO.getPendingRpId();
-          FIDO.confirmTouch();
+        if (GlobalFidoEngine.isWaitingForTouch()) {
+          String rp = GlobalFidoEngine.getPendingRpId();
+          GlobalFidoEngine.confirmTouch();
           logSystem("[FIDO2] Physical Touch confirmed for " + (rp.isEmpty() ? "Passkey operation" : rp));
           setStatus(0, 255, 60); // Neon Lime Green Confirmation
           delay(300);

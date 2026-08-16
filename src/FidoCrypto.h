@@ -128,3 +128,53 @@ public:
   static bool verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pinAuth16);
 };
 
+struct CborWriter {
+  std::vector<uint8_t> buf;
+
+  void writeTypeAndVal(uint8_t majorType, uint64_t val) {
+    uint8_t type = (majorType << 5);
+    if (val <= 23) {
+      buf.push_back(type | static_cast<uint8_t>(val));
+    } else if (val <= 0xFF) {
+      buf.push_back(type | 24);
+      buf.push_back(static_cast<uint8_t>(val));
+    } else if (val <= 0xFFFF) {
+      buf.push_back(type | 25);
+      buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+      buf.push_back(static_cast<uint8_t>(val & 0xFF));
+    } else if (val <= 0xFFFFFFFF) {
+      buf.push_back(type | 26);
+      buf.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
+      buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
+      buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+      buf.push_back(static_cast<uint8_t>(val & 0xFF));
+    }
+  }
+
+  void writeInt(int64_t val) {
+    if (val >= 0) {
+      writeTypeAndVal(0, static_cast<uint64_t>(val));
+    } else {
+      writeTypeAndVal(1, static_cast<uint64_t>(-1 - val));
+    }
+  }
+
+  void writeBytes(const uint8_t *data, size_t len) {
+    writeTypeAndVal(2, len);
+    if (data && len > 0) {
+      buf.insert(buf.end(), data, data + len);
+    }
+  }
+
+  void writeText(const String &str) {
+    writeTypeAndVal(3, str.length());
+    buf.insert(buf.end(), str.begin(), str.end());
+  }
+
+  void writeArray(size_t size) { writeTypeAndVal(4, size); }
+  void writeMap(size_t size) { writeTypeAndVal(5, size); }
+  void writeBool(bool b) { buf.push_back(b ? 0xF5 : 0xF4); }
+  void writeNull() { buf.push_back(0xF6); }
+};
+
+

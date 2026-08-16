@@ -2740,6 +2740,16 @@ async function loadSettings() {
     }
     if (qs("usb-msc-label")) qs("usb-msc-label").value = d.usb_msc_label || "DUCKY_DRIVE";
 
+    const bleFidoCheck = qs("ble-fido-enabled");
+    const bleFidoBadge = qs("ble-fido-status-badge");
+    if (bleFidoCheck) {
+      bleFidoCheck.checked = d.ble_fido_enabled ?? false;
+      if (bleFidoBadge) {
+        bleFidoBadge.textContent = bleFidoCheck.checked ? "Active" : "Disabled";
+        bleFidoBadge.className = bleFidoCheck.checked ? "badge ok" : "badge";
+      }
+    }
+
     if (typeof d.kvm_enabled === "boolean") qs("kvm-enabled").checked = d.kvm_enabled;
     if (d.kvm_port != null) qs("kvm-port").value = d.kvm_port;
     if (typeof d.kvm_allowed_ip === "string") qs("kvm-allowed-ip").value = d.kvm_allowed_ip;
@@ -2814,6 +2824,7 @@ async function saveSettings() {
     usb_pid: usbPid,
     usb_msc_enabled: qs("usb-msc-enabled") ? qs("usb-msc-enabled").checked : true,
     usb_msc_label: qs("usb-msc-label") ? qs("usb-msc-label").value.trim() : "DUCKY_DRIVE",
+    ble_fido_enabled: qs("ble-fido-enabled") ? qs("ble-fido-enabled").checked : false,
 
     kvm_enabled: qs("kvm-enabled").checked,
     kvm_port: Math.trunc(clampNumber(qs("kvm-port").value, 1, 65535)),
@@ -3688,6 +3699,14 @@ function initEvents() {
     if (mscBadge) {
       mscBadge.textContent = e.target.checked ? "Enabled" : "Disabled";
       mscBadge.className = e.target.checked ? "badge ok" : "badge";
+    }
+  });
+
+  qs("ble-fido-enabled")?.addEventListener("change", (e) => {
+    const bleBadge = qs("ble-fido-status-badge");
+    if (bleBadge) {
+      bleBadge.textContent = e.target.checked ? "Active" : "Disabled";
+      bleBadge.className = e.target.checked ? "badge ok" : "badge";
     }
   });
 

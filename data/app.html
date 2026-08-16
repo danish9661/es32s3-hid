@@ -759,6 +759,23 @@
             <p class="small" style="color:var(--muted); margin-top:8px;">Preloaded Files in PSRAM: <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>, <code>README.TXT</code>. (Requires Save Settings & Reboot to apply).</p>
           </div>
 
+          <div class="network-info-card" style="margin-top:16px;">
+            <div class="network-head">
+              <h4>Bluetooth Low Energy (BLE) FIDO2 Passkeys</h4>
+              <span id="ble-fido-status-badge" class="badge">Wireless</span>
+            </div>
+            <p class="small">Allows authenticating to <strong>iPhones, iPads, and Android smartphones</strong> wirelessly over Bluetooth (FIDO Service <code>0xFFFD</code>) without a USB cable. When disabled, the entire Bluetooth controller is de-allocated to conserve 100% memory and CPU performance.</p>
+
+            <div class="settings-grid" style="margin-top:12px;">
+              <div>
+                <label class="checkbox-row" style="margin-top:8px;">
+                  <input id="ble-fido-enabled" type="checkbox">
+                  <span><strong>Enable Wireless BLE Passkeys (0xFFFD)</strong></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
           <h3 style="margin-top:24px;">Web OTA Firmware & Filesystem Update</h3>
           <div class="network-info-card ota-card">
             <div class="network-head">
