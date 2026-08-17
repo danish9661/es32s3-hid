@@ -254,11 +254,23 @@ sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --abs-mouse --screen-width 1920 
 
 #### 4. Replay Macro Locally via UDP (`--replay`)
 ```bash
-# Standard 1:1 speed replay
-sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.txt
+# Replay binary .krec macro
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.krec
 
 # Replay with movement scaling (e.g. 70% speed / sensitivity adjustment)
-sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.txt --mouse-scale 0.7
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.krec --mouse-scale 0.7
+```
+
+#### 5. Inspect & Convert Macros (`--view`, `--to-txt`, `--to-krec`)
+```bash
+# Print a formatted table of all events in a binary .krec file:
+python3 data/esp32_kvm.py --view macro.krec
+
+# Convert binary .krec to readable .txt:
+python3 data/esp32_kvm.py --to-txt macro.krec -o macro.txt
+
+# Convert readable .txt to optimized binary .krec:
+python3 data/esp32_kvm.py --to-krec macro.txt -o macro.krec
 ```
 
 ---
@@ -274,43 +286,27 @@ The ESP32-S3 firmware includes a **dedicated USB HID Absolute Mouse** report des
 
 ---
 
-## Action Recorder & Replay Engine
+## Action Recorder & Binary `.krec` Format
 
-Record real-time keyboard and mouse events and save them as action files on the ESP32 (`/actions`).
+Action macros are recorded and executed using the **`.krec` binary stream format** directly in ESP32 hardware memory without string parsing overhead.
 
-### Action File Format Specification
-Files are line-delimited with pipe-separated tokens:
-
-```text
-# Delay(ms) | Event Type | Parameters...
-0|key_down|128
-20|key_tap|114|35
-40|key_up|128
-100|combo|1|99|40
-15|mouse_move|12|-8
-15|mouse_abs|16383|16383
-50|mouse_scroll|1|0
-30|mouse_button|left|click
-0|consumer|234
-```
-
-### Event Types:
-- `key_tap|<code>|<hold_ms>`
-- `key_down|<code>`
-- `key_up|<code>`
-- `key_release_all`
-- `combo|<flags>|<code>|<hold_ms>` (Flags bitmask: 1=Ctrl, 2=Alt, 4=Shift, 8=Win)
-- `mouse_move|<dx>|<dy>` (Relative delta movement)
-- `mouse_abs|<x>|<y>` (Absolute coordinates $0..32767$, resolution-independent)
-- `mouse_scroll|<wheel>|<pan>`
-- `mouse_button|<left|right|middle>|<click|down|up>`
-- `consumer|<usage_id>`
+### Binary `.krec` Structure:
+- **Header (8 bytes)**:
+  - `magic` (4 bytes): `KREC` (`0x4345524B`)
+  - `version` (uint16_t): `1`
+  - `reserved` (uint16_t): `0`
+- **Events (8 bytes each)**:
+  - `delay_ms` (`uint16_t`): Delta delay before event ($0..65535\text{ ms}$)
+  - `type` (`uint8_t`): Event type (1=key_down, 2=key_up, 3=key_tap, 4=release_all, 5=combo, 6=mouse_move, 7=mouse_abs, 8=mouse_scroll, 9=mouse_button, 10=consumer)
+  - `flags` (`uint8_t`): Button bitmask / modifier mask
+  - `param1` (`int16_t`): HID code / $dx$ / Absolute $X$ / Button action
+  - `param2` (`int16_t`): Hold duration / $dy$ / Absolute $Y$ / Pan
 
 ### Uploading & Running on Hardware:
 1. Open the Web Dashboard at `http://esp32-hid.local` (or `http://192.168.4.1`).
 2. Go to the **Scripts / Actions** tab.
-3. Click **Import Action File To ESP** and select your recorded `.txt` file.
-4. Select the file from the dropdown and click **▶ Run Selected** to replay it directly from ESP32 hardware memory.
+3. Click **Import Action File To ESP** and select your `.krec` file.
+4. Select the file from the dropdown and click **Run Selected File** to execute the macro with zero latency directly from ESP32 flash.
 
 ---
 

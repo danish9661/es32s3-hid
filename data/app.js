@@ -2255,37 +2255,73 @@ async function loadBridgeRecordStatus() {
   }
 }
 
-function encodeActionFile(events) {
-  const lines = [
-    actionFileHeader,
-    "# delay_ms|event|params",
-  ];
+function encodeKrecBinary(events) {
+  const buffer = new ArrayBuffer(8 + events.length * 8);
+  const view = new DataView(buffer);
 
-  events.forEach((event) => {
-    const delay = Math.trunc(clampNumber(event.delay, 0, 60000));
+  // Magic 'KREC' (0x4B, 0x52, 0x45, 0x43)
+  view.setUint8(0, 0x4B);
+  view.setUint8(1, 0x52);
+  view.setUint8(2, 0x45);
+  view.setUint8(3, 0x43);
+  view.setUint16(4, 1, true); // version 1 (little-endian)
+  view.setUint16(6, 0, true); // reserved 0
 
-    if (event.type === "key_tap") {
-      lines.push(`${delay}|key_tap|${Math.trunc(clampNumber(event.code, 0, 255))}|${Math.trunc(clampNumber(event.hold, 10, 300))}`);
-    } else if (event.type === "key_down") {
-      lines.push(`${delay}|key_down|${Math.trunc(clampNumber(event.code, 0, 255))}`);
-    } else if (event.type === "key_up") {
-      lines.push(`${delay}|key_up|${Math.trunc(clampNumber(event.code, 0, 255))}`);
-    } else if (event.type === "key_release_all") {
-      lines.push(`${delay}|key_release_all`);
-    } else if (event.type === "combo") {
-      lines.push(`${delay}|combo|${Math.trunc(clampNumber(event.flags, 0, 15))}|${Math.trunc(clampNumber(event.code, 0, 255))}|${Math.trunc(clampNumber(event.hold, 10, 300))}`);
-    } else if (event.type === "mouse_move") {
-      lines.push(`${delay}|mouse_move|${Math.trunc(clampNumber(event.dx, -2048, 2048))}|${Math.trunc(clampNumber(event.dy, -2048, 2048))}`);
-    } else if (event.type === "mouse_scroll") {
-      lines.push(`${delay}|mouse_scroll|${Math.trunc(clampNumber(event.wheel, -127, 127))}|${Math.trunc(clampNumber(event.pan, -127, 127))}`);
-    } else if (event.type === "mouse_button") {
-      lines.push(`${delay}|mouse_button|${Math.trunc(clampNumber(event.button, 1, 31))}|${Math.trunc(clampNumber(event.action, 0, 2))}`);
-    } else if (event.type === "consumer") {
-      lines.push(`${delay}|consumer|${Math.trunc(clampNumber(event.usage, 0, 0xFFFF))}`);
+  let offset = 8;
+  const TYPE_MAP = {
+    key_down: 1,
+    key_up: 2,
+    key_tap: 3,
+    key_release_all: 4,
+    combo: 5,
+    mouse_move: 6,
+    mouse_abs: 7,
+    mouse_scroll: 8,
+    mouse_button: 9,
+    consumer: 10,
+  };
+
+  events.forEach((ev) => {
+    const delay = Math.trunc(clampNumber(ev.delay, 0, 65535));
+    const type = TYPE_MAP[ev.type] || 0;
+    let flags = 0;
+    let p1 = 0;
+    let p2 = 0;
+
+    if (ev.type === "key_down" || ev.type === "key_up") {
+      p1 = Math.trunc(clampNumber(ev.code, 0, 255));
+    } else if (ev.type === "key_tap") {
+      p1 = Math.trunc(clampNumber(ev.code, 0, 255));
+      p2 = Math.trunc(clampNumber(ev.hold, 10, 300));
+    } else if (ev.type === "combo") {
+      flags = Math.trunc(clampNumber(ev.flags, 0, 15));
+      p1 = Math.trunc(clampNumber(ev.code, 0, 255));
+      p2 = Math.trunc(clampNumber(ev.hold, 10, 300));
+    } else if (ev.type === "mouse_move") {
+      p1 = Math.trunc(clampNumber(ev.dx, -4096, 4096));
+      p2 = Math.trunc(clampNumber(ev.dy, -4096, 4096));
+    } else if (ev.type === "mouse_abs") {
+      p1 = Math.trunc(clampNumber(ev.x, 0, 32767));
+      p2 = Math.trunc(clampNumber(ev.y, 0, 32767));
+    } else if (ev.type === "mouse_scroll") {
+      p1 = Math.trunc(clampNumber(ev.wheel, -127, 127));
+      p2 = Math.trunc(clampNumber(ev.pan, -127, 127));
+    } else if (ev.type === "mouse_button") {
+      flags = Math.trunc(clampNumber(ev.button, 1, 31));
+      p1 = Math.trunc(clampNumber(ev.action, 0, 2));
+    } else if (ev.type === "consumer") {
+      p1 = Math.trunc(clampNumber(ev.usage, 0, 0xFFFF));
     }
+
+    view.setUint16(offset + 0, delay, true);
+    view.setUint8(offset + 2, type);
+    view.setUint8(offset + 3, flags);
+    view.setInt16(offset + 4, p1, true);
+    view.setInt16(offset + 6, p2, true);
+    offset += 8;
   });
 
-  return `${lines.join("\n")}\n`;
+  return buffer;
 }
 
 async function startRecording() {
@@ -2398,19 +2434,22 @@ async function saveRecordingToDevice() {
     return;
   }
 
-  const entered = qs("record-file-name").value.trim() || `action-${Date.now()}.txt`;
+  let entered = qs("record-file-name").value.trim() || `action-${Date.now()}.krec`;
+  if (!entered.toLowerCase().endsWith(".krec")) {
+    entered += ".krec";
+  }
   const safeName = sanitizeActionFilename(entered);
   if (!safeName) {
     setText("record-status", "Invalid file name. Allowed: letters, numbers, space, _, -, .");
     return;
   }
 
-  const content = encodeActionFile(recorder.events);
+  const binaryData = encodeKrecBinary(recorder.events);
   try {
     const res = await api(`/api/action_file/save?name=${encodeURIComponent(safeName)}`, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: content,
+      headers: { "Content-Type": "application/octet-stream" },
+      body: binaryData,
     });
 
     if (!res.ok) {
@@ -2420,7 +2459,7 @@ async function saveRecordingToDevice() {
 
     qs("record-file-name").value = safeName;
     await loadActionFiles();
-    setText("record-status", `Saved to ESP as ${safeName}.`);
+    setText("record-status", `Saved to ESP as ${safeName} (${binaryData.byteLength} bytes).`);
   } catch (_) {
     setText("record-status", "Network error while saving recording.");
   }
@@ -2437,10 +2476,21 @@ function downloadRecordingFile() {
     return;
   }
 
-  const entered = qs("record-file-name").value.trim() || `action-${Date.now()}.txt`;
-  const safeName = sanitizeActionFilename(entered) || `action-${Date.now()}.txt`;
-  downloadTextFile(safeName, encodeActionFile(recorder.events), "text/plain");
-  setText("record-status", "Recording downloaded.");
+  let entered = qs("record-file-name").value.trim() || `action-${Date.now()}.krec`;
+  if (!entered.toLowerCase().endsWith(".krec")) {
+    entered += ".krec";
+  }
+  const safeName = sanitizeActionFilename(entered) || `action-${Date.now()}.krec`;
+  const binaryData = encodeKrecBinary(recorder.events);
+  const blob = new Blob([binaryData], { type: "application/octet-stream" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = safeName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  setText("record-status", `Recording downloaded as ${safeName}.`);
 }
 
 function selectedActionFileName() {
@@ -2542,23 +2592,27 @@ async function deleteSelectedActionFile() {
 }
 
 async function importActionFileToDevice(file) {
-  const safeName = sanitizeActionFilename(file?.name || "imported-action.txt");
+  let entered = file?.name || `imported-action-${Date.now()}.krec`;
+  if (!entered.toLowerCase().endsWith(".krec")) {
+    entered += ".krec";
+  }
+  const safeName = sanitizeActionFilename(entered);
   if (!safeName) {
     setText("record-status", "Invalid imported file name.");
     return;
   }
 
-  const text = await file.text();
-  if (!text || text.length < 8) {
-    setText("record-status", "Imported file is empty.");
+  const arrayBuffer = await file.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength < 8) {
+    setText("record-status", "Imported file is empty or invalid.");
     return;
   }
 
   try {
     const res = await api(`/api/action_file/save?name=${encodeURIComponent(safeName)}`, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: text,
+      headers: { "Content-Type": "application/octet-stream" },
+      body: arrayBuffer,
     });
 
     if (!res.ok) {
@@ -2568,7 +2622,7 @@ async function importActionFileToDevice(file) {
 
     qs("record-file-name").value = safeName;
     await loadActionFiles();
-    setText("record-status", `Imported and saved as ${safeName}.`);
+    setText("record-status", `Imported and saved as ${safeName} (${arrayBuffer.byteLength} bytes).`);
   } catch (_) {
     setText("record-status", "Network error while importing action file.");
   }

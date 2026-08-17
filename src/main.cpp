@@ -159,7 +159,7 @@ constexpr uint8_t LOGIN_SLOT_COUNT = 12;
 constexpr const char *SETTINGS_FILE = "/settings.json";
 constexpr const char *SCRIPTS_DIR = "/scripts";
 constexpr const char *ACTIONS_DIR = "/actions";
-constexpr size_t ACTION_FILE_MAX_SIZE = 512UL * 1024UL;
+constexpr size_t ACTION_FILE_MAX_SIZE = 2UL * 1024UL * 1024UL; // 2 MB max binary .krec file
 
 constexpr uint16_t KVM_DEFAULT_PORT = 4210;
 constexpr uint16_t KVM_PACKET_MAGIC = 0xCAFE;
@@ -2581,6 +2581,35 @@ void replayMouseDelta(int dx, int dy) {
   }
 }
 
+#pragma pack(push, 1)
+struct KrecHeader {
+  char magic[4];       // "KREC"
+  uint16_t version;    // 1
+  uint16_t reserved;   // 0
+};
+
+struct KrecEvent {
+  uint16_t delay_ms;
+  uint8_t  type;
+  uint8_t  flags;
+  int16_t  param1;
+  int16_t  param2;
+};
+#pragma pack(pop)
+
+enum KrecEventType : uint8_t {
+  KREC_KEY_DOWN        = 1,
+  KREC_KEY_UP          = 2,
+  KREC_KEY_TAP         = 3,
+  KREC_KEY_RELEASE_ALL = 4,
+  KREC_COMBO           = 5,
+  KREC_MOUSE_MOVE      = 6,
+  KREC_MOUSE_ABS       = 7,
+  KREC_MOUSE_SCROLL    = 8,
+  KREC_MOUSE_BUTTON    = 9,
+  KREC_CONSUMER        = 10
+};
+
 bool runActionFile(const String &safeName) {
   String filePath = actionPathFromName(safeName);
   if (!LittleFS.exists(filePath)) return false;
@@ -2588,83 +2617,94 @@ bool runActionFile(const String &safeName) {
   File file = LittleFS.open(filePath, "r");
   if (!file) return false;
 
-  while (file.available() && !stopScriptFlag) {
-    String line = file.readStringUntil('\n');
-    line.trim();
+  // Check 8-byte KREC binary header
+  KrecHeader hdr;
+  if (file.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)) != sizeof(hdr)) {
+    file.close();
+    return false;
+  }
 
-    if (line.isEmpty() || line.startsWith("#")) continue;
+  if (memcmp(hdr.magic, "KREC", 4) != 0) {
+    file.close();
+    return false;
+  }
 
-    String parts[8];
-    int count = splitPipe(line, parts, 8);
-    if (count < 2) continue;
-
-    int delayMs = clampInt(parts[0].toInt(), 0, 60000);
-    if (delayMs > 0) delayWithStop(static_cast<uint32_t>(delayMs));
+  KrecEvent ev;
+  while (file.read(reinterpret_cast<uint8_t*>(&ev), sizeof(ev)) == sizeof(ev) && !stopScriptFlag) {
+    if (ev.delay_ms > 0) delayWithStop(ev.delay_ms);
     if (stopScriptFlag) break;
 
-    String event = parts[1];
-    event.toLowerCase();
-
-    if (event == "key_tap" && count >= 4) {
-      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
-      uint16_t hold = static_cast<uint16_t>(clampInt(parts[3].toInt(), 10, 300));
-      keyboardTap(code, hold);
-    } else if (event == "key_down" && count >= 3) {
-      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
-      if(Keyboard) Keyboard->press(code);
-    } else if (event == "key_up" && count >= 3) {
-      uint8_t code = static_cast<uint8_t>(clampInt(parts[2].toInt(), 0, 255));
-      if(Keyboard) Keyboard->release(code);
-    } else if (event == "key_release_all") {
-      if(Keyboard) Keyboard->releaseAll();
-    } else if (event == "combo" && count >= 5) {
-      int flags = clampInt(parts[2].toInt(), 0, 15);
-      uint8_t code = static_cast<uint8_t>(clampInt(parts[3].toInt(), 0, 255));
-      uint16_t hold = static_cast<uint16_t>(clampInt(parts[4].toInt(), 10, 300));
-
-      keyboardCombo((flags & 0x1) != 0, (flags & 0x2) != 0, (flags & 0x4) != 0, (flags & 0x8) != 0, code, hold);
-    } else if (event == "mouse_move" && count >= 4) {
-      int dx = clampInt(parts[2].toInt(), -4096, 4096);
-      int dy = clampInt(parts[3].toInt(), -4096, 4096);
-      replayMouseDelta(dx, dy);
-    } else if (event == "mouse_abs" && count >= 4) {
-      int x = clampInt(parts[2].toInt(), 0, 32767);
-      int y = clampInt(parts[3].toInt(), 0, 32767);
-      if (AbsMouse) AbsMouse->moveTo(static_cast<uint16_t>(x), static_cast<uint16_t>(y));
-    } else if (event == "mouse_scroll" && count >= 4) {
-      int wheel = clampInt(parts[2].toInt(), -127, 127);
-      int pan = clampInt(parts[3].toInt(), -127, 127);
-      if(Mouse) Mouse->move(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
-      if(AbsMouse) AbsMouse->moveTo(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
-    } else if (event == "mouse_button" && count >= 4) {
-      uint8_t button = parseActionMouseButtonToken(parts[2]);
-      uint8_t action = parseActionMouseActionToken(parts[3]);
-      if (action == MOUSE_ACTION_DOWN) {
-        if(Mouse) Mouse->press(button);
-        if(AbsMouse) AbsMouse->press(button);
-      } else if (action == MOUSE_ACTION_UP) {
-        if(Mouse) Mouse->release(button);
-        if(AbsMouse) AbsMouse->release(button);
-      } else {
-        if(Mouse) Mouse->click(button);
-        if(AbsMouse) AbsMouse->click(button);
+    switch (ev.type) {
+      case KREC_KEY_DOWN:
+        if (Keyboard) Keyboard->press(static_cast<uint8_t>(ev.param1));
+        break;
+      case KREC_KEY_UP:
+        if (Keyboard) Keyboard->release(static_cast<uint8_t>(ev.param1));
+        break;
+      case KREC_KEY_TAP: {
+        uint8_t code = static_cast<uint8_t>(ev.param1);
+        uint16_t hold = static_cast<uint16_t>(clampInt(ev.param2, 10, 300));
+        keyboardTap(code, hold);
+        break;
       }
-    } else if (event == "consumer" && count >= 3) {
-      uint16_t usage = static_cast<uint16_t>(clampInt(parts[2].toInt(), 0, 0xFFFF));
-      if (usage == 0) {
-        if(Consumer) Consumer->release();
-      } else {
-        if(Consumer) Consumer->press(usage);
-        if(Consumer) Consumer->release();
+      case KREC_KEY_RELEASE_ALL:
+        if (Keyboard) Keyboard->releaseAll();
+        break;
+      case KREC_COMBO: {
+        uint8_t flags = ev.flags;
+        uint8_t code = static_cast<uint8_t>(ev.param1);
+        uint16_t hold = static_cast<uint16_t>(clampInt(ev.param2, 10, 300));
+        keyboardCombo((flags & 0x1) != 0, (flags & 0x2) != 0, (flags & 0x4) != 0, (flags & 0x8) != 0, code, hold);
+        break;
       }
+      case KREC_MOUSE_MOVE:
+        replayMouseDelta(ev.param1, ev.param2);
+        break;
+      case KREC_MOUSE_ABS: {
+        uint16_t x = static_cast<uint16_t>(clampInt(ev.param1, 0, 32767));
+        uint16_t y = static_cast<uint16_t>(clampInt(ev.param2, 0, 32767));
+        if (AbsMouse) AbsMouse->moveTo(x, y);
+        break;
+      }
+      case KREC_MOUSE_SCROLL:
+        if (Mouse) Mouse->move(0, 0, static_cast<int8_t>(ev.param1), static_cast<int8_t>(ev.param2));
+        if (AbsMouse) AbsMouse->moveTo(0, 0, static_cast<int8_t>(ev.param1), static_cast<int8_t>(ev.param2));
+        break;
+      case KREC_MOUSE_BUTTON: {
+        uint8_t button = ev.flags ? ev.flags : parseActionMouseButtonToken("left");
+        uint8_t action = static_cast<uint8_t>(ev.param1);
+        if (action == MOUSE_ACTION_DOWN) {
+          if (Mouse) Mouse->press(button);
+          if (AbsMouse) AbsMouse->press(button);
+        } else if (action == MOUSE_ACTION_UP) {
+          if (Mouse) Mouse->release(button);
+          if (AbsMouse) AbsMouse->release(button);
+        } else {
+          if (Mouse) Mouse->click(button);
+          if (AbsMouse) AbsMouse->click(button);
+        }
+        break;
+      }
+      case KREC_CONSUMER: {
+        uint16_t usage = static_cast<uint16_t>(ev.param1);
+        if (usage == 0) {
+          if (Consumer) Consumer->release();
+        } else {
+          if (Consumer) Consumer->press(usage);
+          if (Consumer) Consumer->release();
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
 
   file.close();
-  if(Keyboard) Keyboard->releaseAll();
-  if(Mouse) Mouse->release(MOUSE_ALL);
-  if(AbsMouse) AbsMouse->release(MOUSE_ALL);
-  if(Consumer) Consumer->release();
+  if (Keyboard) Keyboard->releaseAll();
+  if (Mouse) Mouse->release(MOUSE_ALL);
+  if (AbsMouse) AbsMouse->release(MOUSE_ALL);
+  if (Consumer) Consumer->release();
   return true;
 }
 

@@ -116,6 +116,41 @@ CHAR_TO_HID = {
 }
 
 # -----------------------------------------------------------------------------
+# KREC Binary Action Format Definition (ESP32-S3 Native)
+# -----------------------------------------------------------------------------
+KREC_MAGIC = b'KREC'
+KREC_VERSION = 1
+
+KREC_KEY_DOWN = 1
+KREC_KEY_UP = 2
+KREC_KEY_TAP = 3
+KREC_KEY_RELEASE_ALL = 4
+KREC_COMBO = 5
+KREC_MOUSE_MOVE = 6
+KREC_MOUSE_ABS = 7
+KREC_MOUSE_SCROLL = 8
+KREC_MOUSE_BUTTON = 9
+KREC_CONSUMER = 10
+
+KREC_TYPE_NAMES = {
+    KREC_KEY_DOWN: "KEY_DOWN",
+    KREC_KEY_UP: "KEY_UP",
+    KREC_KEY_TAP: "KEY_TAP",
+    KREC_KEY_RELEASE_ALL: "KEY_RELEASE_ALL",
+    KREC_COMBO: "COMBO",
+    KREC_MOUSE_MOVE: "MOUSE_MOVE",
+    KREC_MOUSE_ABS: "MOUSE_ABS",
+    KREC_MOUSE_SCROLL: "MOUSE_SCROLL",
+    KREC_MOUSE_BUTTON: "MOUSE_BUTTON",
+    KREC_CONSUMER: "CONSUMER",
+}
+
+# 8-byte event struct: delay_ms(H=uint16), type(B=uint8), flags(B=uint8), param1(h=int16), param2(h=int16)
+FMT_KREC_EVENT = '<HBBhh'
+FMT_KREC_HEADER = '<4sHH'
+
+
+# -----------------------------------------------------------------------------
 # Input State & Thread-Safe Queue
 # -----------------------------------------------------------------------------
 class KvmState:
@@ -126,11 +161,12 @@ class KvmState:
         self.kvm_active = False
         self.seq = 0
 
-        # Action Recorder
+        # Action Recorder (Binary .krec)
         self.recording = False
         self.record_start_ms = 0
         self.last_record_ms = 0   # timestamp of last recorded event (for delta calc)
-        self.recorded_lines = []
+        self.recorded_events = bytearray()
+        self.event_count = 0
         self.abs_mode = abs_mode
         self.screen_width = screen_width
         self.screen_height = screen_height
@@ -172,6 +208,19 @@ class KvmState:
             self.mouse_pan = 0
             self.mouse_buttons = 0
 
+    def add_krec_raw_event(self, ev_type, flags=0, param1=0, param2=0):
+        """Append an 8-byte binary event record to the recording buffer."""
+        if not self.recording:
+            return
+        now_ms = time.time() * 1000
+        dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
+        if dt > 65535:
+            dt = 65535
+        self.last_record_ms = now_ms
+        pkt = struct.pack(FMT_KREC_EVENT, dt, ev_type, flags, int(param1), int(param2))
+        self.recorded_events.extend(pkt)
+        self.event_count += 1
+
     def _flush_mouse_bucket(self, now_ms):
         """Flush accumulated mouse movement as a single recorded event. Call with lock held."""
         if not self.recording:
@@ -183,20 +232,16 @@ class KvmState:
         self.rec_bucket_start_ms = now_ms
 
         if dx or dy:
-            dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
-            self.last_record_ms = now_ms
             if self.abs_mode:
                 self.curr_abs_x = max(0, min(self.screen_width, self.curr_abs_x + dx))
                 self.curr_abs_y = max(0, min(self.screen_height, self.curr_abs_y + dy))
                 norm_x = int((self.curr_abs_x / self.screen_width) * 32767)
                 norm_y = int((self.curr_abs_y / self.screen_height) * 32767)
-                self.recorded_lines.append(f"{dt}|mouse_abs|{norm_x}|{norm_y}")
+                self.add_krec_raw_event(KREC_MOUSE_ABS, flags=0, param1=norm_x, param2=norm_y)
             else:
-                self.recorded_lines.append(f"{dt}|mouse_move|{dx}|{dy}")
+                self.add_krec_raw_event(KREC_MOUSE_MOVE, flags=0, param1=dx, param2=dy)
         if wheel or pan:
-            dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
-            self.last_record_ms = now_ms
-            self.recorded_lines.append(f"{dt}|mouse_scroll|{wheel}|{pan}")
+            self.add_krec_raw_event(KREC_MOUSE_SCROLL, flags=0, param1=wheel, param2=pan)
 
     def add_mouse_record(self, dx=0, dy=0, wheel=0, pan=0):
         """Accumulate mouse movement into current time bucket; flush when bucket expires."""
@@ -223,16 +268,10 @@ class KvmState:
         if (self.rec_acc_dx or self.rec_acc_dy or self.rec_acc_wheel or self.rec_acc_pan):
             self._flush_mouse_bucket(now_ms)
 
-    def add_record_line(self, line):
-        """Record a keyboard or mouse-button event (non-movement). Flushes any pending mouse move first."""
-        if self.recording:
-            # Always flush pending mouse accumulation before a key/button event
-            self.flush_mouse_record_now()
-            now_ms = time.time() * 1000
-            dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
-            self.last_record_ms = now_ms
-            pipe_line = line.replace(" ", "|")
-            self.recorded_lines.append(f"{dt}|{pipe_line}")
+    def get_krec_bytes(self):
+        """Return the complete binary .krec file buffer with 8-byte header."""
+        hdr = struct.pack(FMT_KREC_HEADER, KREC_MAGIC, KREC_VERSION, 0)
+        return hdr + bytes(self.recorded_events)
 
 
 
@@ -454,74 +493,240 @@ class ScreenshotServer(threading.Thread):
 
 
 # -----------------------------------------------------------------------------
-# Action Replay Engine
+# KREC File Reader & Replay Engine
 # -----------------------------------------------------------------------------
+def read_krec_file(file_path):
+    """Parses a binary .krec file and returns a list of (delay_ms, type, flags, param1, param2)."""
+    if not os.path.exists(file_path):
+        print(f"❌ File '{file_path}' not found.")
+        return None
+
+    with open(file_path, 'rb') as f:
+        data = f.read()
+
+    if len(data) < 8:
+        print(f"❌ File '{file_path}' is too small to be a valid .krec file.")
+        return None
+
+    magic, version, _ = struct.unpack_from(FMT_KREC_HEADER, data, 0)
+    if magic != KREC_MAGIC:
+        print(f"❌ File '{file_path}' does not have KREC magic header (found {magic!r}).")
+        return None
+
+    events = []
+    offset = 8
+    event_size = struct.calcsize(FMT_KREC_EVENT)
+    while offset + event_size <= len(data):
+        dt, ev_type, flags, p1, p2 = struct.unpack_from(FMT_KREC_EVENT, data, offset)
+        events.append((dt, ev_type, flags, p1, p2))
+        offset += event_size
+
+    return events
+
+
+def view_krec_file(file_path):
+    """Prints a formatted human-readable table of all events in a .krec file."""
+    events = read_krec_file(file_path)
+    if events is None:
+        return
+    print(f"\n📂 Viewing KREC: {file_path} ({len(events)} events)\n" + "=" * 65)
+    print(f"{'Delay':<10} | {'Event Type':<16} | {'Flags':<6} | {'Param1':<8} | {'Param2':<8}")
+    print("-" * 65)
+    total_time = 0
+    for dt, ev_type, flags, p1, p2 in events:
+        total_time += dt
+        name = KREC_TYPE_NAMES.get(ev_type, f"TYPE_{ev_type}")
+        print(f"+{dt:<8}ms | {name:<16} | {flags:<6} | {p1:<8} | {p2:<8}")
+    print("=" * 65)
+    print(f"Total Time: {total_time/1000.0:.2f}s | Total Events: {len(events)}\n")
+
+
+def krec_to_txt(krec_path, txt_path=None):
+    """Converts a binary .krec file into a readable text file."""
+    events = read_krec_file(krec_path)
+    if events is None:
+        return
+    out_file = txt_path or (os.path.splitext(krec_path)[0] + ".txt")
+    lines = ["# ESP32-S3 Action Macro (Converted from .krec)", "# delay_ms|event|params..."]
+    for dt, ev_type, flags, p1, p2 in events:
+        if ev_type == KREC_KEY_DOWN:
+            lines.append(f"{dt}|key_down|{p1}")
+        elif ev_type == KREC_KEY_UP:
+            lines.append(f"{dt}|key_up|{p1}")
+        elif ev_type == KREC_KEY_TAP:
+            lines.append(f"{dt}|key_tap|{p1}|{p2}")
+        elif ev_type == KREC_KEY_RELEASE_ALL:
+            lines.append(f"{dt}|key_release_all")
+        elif ev_type == KREC_COMBO:
+            lines.append(f"{dt}|combo|{flags}|{p1}|{p2}")
+        elif ev_type == KREC_MOUSE_MOVE:
+            lines.append(f"{dt}|mouse_move|{p1}|{p2}")
+        elif ev_type == KREC_MOUSE_ABS:
+            lines.append(f"{dt}|mouse_abs|{p1}|{p2}")
+        elif ev_type == KREC_MOUSE_SCROLL:
+            lines.append(f"{dt}|mouse_scroll|{p1}|{p2}")
+        elif ev_type == KREC_MOUSE_BUTTON:
+            btn_str = {1: 'left', 2: 'right', 4: 'middle', 8: 'backward', 16: 'forward'}.get(flags, str(flags))
+            act_str = 'down' if p1 == 1 else ('up' if p1 == 2 else 'click')
+            lines.append(f"{dt}|mouse_button|{btn_str}|{act_str}")
+        elif ev_type == KREC_CONSUMER:
+            lines.append(f"{dt}|consumer|{p1}")
+
+    with open(out_file, 'w', encoding='utf-8') as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"✅ Converted '{krec_path}' ➔ '{out_file}' ({len(events)} events)")
+
+
+def txt_to_krec(txt_path, krec_path=None):
+    """Converts a readable text file into an optimized binary .krec file."""
+    if not os.path.exists(txt_path):
+        print(f"❌ File '{txt_path}' not found.")
+        return
+    out_file = krec_path or (os.path.splitext(txt_path)[0] + ".krec")
+    events_data = bytearray()
+    with open(txt_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('|') if '|' in line else line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                dt = min(65535, max(0, int(parts[0])))
+                cmd = parts[1].lower()
+                ev_type, flags, p1, p2 = 0, 0, 0, 0
+                if cmd == 'key_down' and len(parts) >= 3:
+                    ev_type, p1 = KREC_KEY_DOWN, int(parts[2])
+                elif cmd == 'key_up' and len(parts) >= 3:
+                    ev_type, p1 = KREC_KEY_UP, int(parts[2])
+                elif cmd == 'key_tap' and len(parts) >= 4:
+                    ev_type, p1, p2 = KREC_KEY_TAP, int(parts[2]), int(parts[3])
+                elif cmd == 'key_release_all':
+                    ev_type = KREC_KEY_RELEASE_ALL
+                elif cmd == 'combo' and len(parts) >= 5:
+                    ev_type, flags, p1, p2 = KREC_COMBO, int(parts[2]), int(parts[3]), int(parts[4])
+                elif cmd == 'mouse_move' and len(parts) >= 4:
+                    ev_type, p1, p2 = KREC_MOUSE_MOVE, int(parts[2]), int(parts[3])
+                elif cmd == 'mouse_abs' and len(parts) >= 4:
+                    ev_type, p1, p2 = KREC_MOUSE_ABS, int(parts[2]), int(parts[3])
+                elif cmd == 'mouse_scroll' and len(parts) >= 4:
+                    ev_type, p1, p2 = KREC_MOUSE_SCROLL, int(parts[2]), int(parts[3])
+                elif cmd == 'mouse_button' and len(parts) >= 4:
+                    ev_type = KREC_MOUSE_BUTTON
+                    btn_map = {'left': 1, 'right': 2, 'middle': 4, 'backward': 8, 'forward': 16}
+                    flags = btn_map.get(parts[2].lower(), int(parts[2]) if parts[2].isdigit() else 1)
+                    act = parts[3].lower()
+                    p1 = 1 if act == 'down' else (2 if act == 'up' else 0)
+                elif cmd == 'consumer' and len(parts) >= 3:
+                    ev_type, p1 = KREC_CONSUMER, int(parts[2])
+                if ev_type > 0:
+                    events_data.extend(struct.pack(FMT_KREC_EVENT, dt, ev_type, flags, p1, p2))
+            except Exception:
+                pass
+    hdr = struct.pack(FMT_KREC_HEADER, KREC_MAGIC, KREC_VERSION, 0)
+    with open(out_file, 'wb') as f:
+        f.write(hdr + events_data)
+    count = len(events_data) // struct.calcsize(FMT_KREC_EVENT)
+    print(f"✅ Converted '{txt_path}' ➔ '{out_file}' ({count} events, {len(hdr) + len(events_data)} bytes)")
+
+
 def replay_action_file(host, port, file_path, scale=1.0):
-    """Replays an action file locally by sending UDP packets."""
+    """Replays a .krec binary action file locally by sending UDP packets."""
     if not os.path.exists(file_path):
         print(f"❌ Action file '{file_path}' not found.")
         return
 
-    print(f"▶️ [REPLAY] Loading action file '{file_path}' (mouse_scale={scale})...")
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    # Check if file is binary .krec or legacy text
+    with open(file_path, 'rb') as f:
+        head = f.read(4)
 
-    print(f"▶️ [REPLAY] Executing {len(lines)} action events...")
+    if head == KREC_MAGIC:
+        events = read_krec_file(file_path)
+    else:
+        # Fallback: convert legacy text on the fly
+        print(f"ℹ️ Loading legacy text file '{file_path}'...")
+        events = []
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('|') if '|' in line else line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    dt = int(parts[0])
+                    cmd = parts[1].lower()
+                    if cmd == 'mouse_move' and len(parts) >= 4:
+                        events.append((dt, KREC_MOUSE_MOVE, 0, int(parts[2]), int(parts[3])))
+                    elif cmd == 'mouse_abs' and len(parts) >= 4:
+                        events.append((dt, KREC_MOUSE_ABS, 0, int(parts[2]), int(parts[3])))
+                    elif cmd == 'mouse_scroll' and len(parts) >= 4:
+                        events.append((dt, KREC_MOUSE_SCROLL, 0, int(parts[2]), int(parts[3])))
+                    elif cmd == 'mouse_button' and len(parts) >= 4:
+                        btn_map = {'left': 1, 'right': 2, 'middle': 4, 'backward': 8, 'forward': 16}
+                        btn = btn_map.get(parts[2].lower(), 1)
+                        p1 = 1 if parts[3].lower() == 'down' else (2 if parts[3].lower() == 'up' else 0)
+                        events.append((dt, KREC_MOUSE_BUTTON, btn, p1, 0))
+                    elif cmd == 'key_down' and len(parts) >= 3:
+                        events.append((dt, KREC_KEY_DOWN, 0, int(parts[2]), 0))
+                    elif cmd == 'key_up' and len(parts) >= 3:
+                        events.append((dt, KREC_KEY_UP, 0, int(parts[2]), 0))
+                except Exception:
+                    pass
+
+    if not events:
+        print(f"❌ No executable events found in '{file_path}'.")
+        return
+
+    print(f"▶️ [REPLAY] Replaying '{file_path}' ({len(events)} events, mouse_scale={scale})...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     target = (host, port)
     seq = 0
 
     start_time = time.time()
-    for line in lines:
-        # Support both pipe-separated (new ESP32 format) and space-separated (old format)
-        parts = line.split('|') if '|' in line else line.split()
-        if len(parts) < 2:
-            continue
+    for dt, ev_type, flags, p1, p2 in events:
         try:
-            target_dt_ms = int(parts[0])
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            if target_dt_ms > elapsed_ms:
-                time.sleep((target_dt_ms - elapsed_ms) / 1000.0)
+            if dt > 0:
+                time.sleep(dt / 1000.0)
 
-            cmd = parts[1].lower()
-            if cmd == "mouse_move" and len(parts) >= 4:
-                dx = int(int(parts[2]) * scale)
-                dy = int(int(parts[3]) * scale)
+            if ev_type == KREC_MOUSE_MOVE:
+                dx = int(p1 * scale)
+                dy = int(p2 * scale)
                 seq = (seq + 1) & 0xFFFFFFFF
                 pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, dx, dy, 0, 0)
                 sock.sendto(pkt, target)
-            elif cmd == "mouse_scroll" and len(parts) >= 4:
-                wheel = int(parts[2])
-                pan = int(parts[3])
+            elif ev_type == KREC_MOUSE_SCROLL:
                 seq = (seq + 1) & 0xFFFFFFFF
-                pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, 0, 0, wheel, pan)
+                pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, 0, 0, p1, p2)
                 sock.sendto(pkt, target)
-            elif cmd == "mouse_button" and len(parts) >= 4:
-                btn_str, act_str = parts[2].lower(), parts[3].lower()
-                btn_map = {'left': 1, 'right': 2, 'middle': 4, 'backward': 8, 'forward': 16}
-                btn = btn_map.get(btn_str, 1)
+            elif ev_type == KREC_MOUSE_BUTTON:
                 seq = (seq + 1) & 0xFFFFFFFF
-                if act_str == "down":
-                    pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, btn, 0, 0, 0, 0)
+                if p1 == 1:  # down
+                    pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, flags, 0, 0, 0, 0)
                     sock.sendto(pkt, target)
-                elif act_str == "up":
+                elif p1 == 2:  # up
                     pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, 0, 0, 0, 0)
                     sock.sendto(pkt, target)
-                else:
-                    pkt1 = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, btn, 0, 0, 0, 0)
+                else:  # click
+                    pkt1 = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, flags, 0, 0, 0, 0)
                     sock.sendto(pkt1, target)
                     time.sleep(0.02)
                     seq = (seq + 1) & 0xFFFFFFFF
                     pkt2 = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, 0, 0, 0, 0)
                     sock.sendto(pkt2, target)
-            elif cmd == "key_down" and len(parts) >= 3:
-                code = int(parts[2])
+            elif ev_type == KREC_KEY_DOWN:
                 seq = (seq + 1) & 0xFFFFFFFF
-                pkt = struct.pack(FMT_KEYBOARD, PACKET_MAGIC, seq, EVENT_KEYBOARD, 0, 0, bytes([code] + [0]*5))
+                pkt = struct.pack(FMT_KEYBOARD, PACKET_MAGIC, seq, EVENT_KEYBOARD, 0, 0, bytes([p1] + [0] * 5))
                 sock.sendto(pkt, target)
-            elif cmd == "key_up" and len(parts) >= 3:
+            elif ev_type == KREC_KEY_UP:
                 seq = (seq + 1) & 0xFFFFFFFF
-                pkt = struct.pack(FMT_KEYBOARD, PACKET_MAGIC, seq, EVENT_KEYBOARD, 0, 0, b'\x00'*6)
+                pkt = struct.pack(FMT_KEYBOARD, PACKET_MAGIC, seq, EVENT_KEYBOARD, 0, 0, b'\x00' * 6)
+                sock.sendto(pkt, target)
+            elif ev_type == KREC_KEY_RELEASE_ALL:
+                seq = (seq + 1) & 0xFFFFFFFF
+                pkt = struct.pack(FMT_KEYBOARD, PACKET_MAGIC, seq, EVENT_KEYBOARD, 0, 0, b'\x00' * 6)
                 sock.sendto(pkt, target)
         except Exception:
             pass
@@ -633,18 +838,19 @@ def run_evdev_linux(args, state, sender):
                             if state.recording:
                                 state.record_start_ms = time.time() * 1000
                                 state.last_record_ms = 0
-                                state.recorded_lines.clear()
-                                print("\n🔴 [RECORD] STARTED — move mouse & type now...")
+                                state.recorded_events.clear()
+                                state.event_count = 0
+                                print("\n🔴 [RECORD] STARTED (Binary .krec) — move mouse & type now...")
                             else:
-                                # Flush any pending mouse accumulation before saving
                                 state.flush_mouse_record_now()
                                 state.rec_bucket_start_ms = 0
-                                n = len(state.recorded_lines)
-                                filename = args.record_file or f"macro_{int(time.time())}.txt"
-                                with open(filename, 'w', encoding='utf-8') as f:
-                                    f.write("# ESP32-S3 Action Macro Recording\n")
-                                    f.write("\n".join(state.recorded_lines) + "\n")
-                                print(f"\n⏹️  [RECORD] STOPPED — saved {n} events → '{filename}'")
+                                filename = args.record_file or f"macro_{int(time.time())}.krec"
+                                if not filename.lower().endswith(".krec"):
+                                    filename += ".krec"
+                                krec_data = state.get_krec_bytes()
+                                with open(filename, 'wb') as f:
+                                    f.write(krec_data)
+                                print(f"\n⏹️  [RECORD] STOPPED — saved {state.event_count} events ({len(krec_data)} bytes) → '{filename}'")
                         continue
 
                     # 3. Mouse buttons (BTN_LEFT etc.)
@@ -664,11 +870,13 @@ def run_evdev_linux(args, state, sender):
                     if btn_mask:
                         with state.lock:
                             if val == 1:
-                                state.add_record_line(f"mouse_button {btn_name} down")
+                                state.flush_mouse_record_now()
+                                state.add_krec_raw_event(KREC_MOUSE_BUTTON, flags=btn_mask, param1=1)
                                 if state.kvm_active:
                                     state.mouse_buttons |= btn_mask
                             elif val == 0:
-                                state.add_record_line(f"mouse_button {btn_name} up")
+                                state.flush_mouse_record_now()
+                                state.add_krec_raw_event(KREC_MOUSE_BUTTON, flags=btn_mask, param1=2)
                                 if state.kvm_active:
                                     state.mouse_buttons &= ~btn_mask
                         continue
@@ -689,12 +897,14 @@ def run_evdev_linux(args, state, sender):
                     if hid:
                         with state.lock:
                             if val == 1:
-                                state.add_record_line(f"key_down {hid}")
+                                state.flush_mouse_record_now()
+                                state.add_krec_raw_event(KREC_KEY_DOWN, flags=0, param1=hid)
                                 if state.kvm_active:
                                     state.pressed_keys.add(hid)
                                     state.kbd_dirty = True
                             elif val == 0:
-                                state.add_record_line(f"key_up {hid}")
+                                state.flush_mouse_record_now()
+                                state.add_krec_raw_event(KREC_KEY_UP, flags=0, param1=hid)
                                 if state.kvm_active:
                                     state.pressed_keys.discard(hid)
                                     state.kbd_dirty = True
@@ -755,19 +965,32 @@ def run_evdev_linux(args, state, sender):
 # Main Cross-Platform Entry & Loop
 # -----------------------------------------------------------------------------
 def run_kvm(args):
+    # Check CLI helper actions first
+    if args.view:
+        view_krec_file(args.view)
+        return
+
+    if args.to_txt:
+        krec_to_txt(args.to_txt, args.output)
+        return
+
+    if args.to_krec:
+        txt_to_krec(args.to_krec, args.output)
+        return
+
+    if args.replay:
+        replay_action_file(args.ip, args.port, args.replay, scale=args.mouse_scale)
+        return
+
     print("=" * 65)
     print("🚀 ESP32-S3 Wireless KVM Client (Universal: Win/Linux/macOS)")
     print("=" * 65)
     print(f"📡 Target ESP32 : {args.ip}:{args.port}")
     print(f"🔘 KVM Toggle   : [{args.toggle.upper()}]")
-    print(f"🔴 Record Toggle: [{args.record_key.upper()}]")
+    print(f"🔴 Record Toggle: [{args.record_key.upper()}] (Binary .krec)")
     print(f"📋 Paste Hotkey : [Ctrl+Alt+V]")
     print(f"💻 Mode         : {'Exclusive' if args.exclusive else 'Shared'}")
     print("=" * 65)
-
-    if args.replay:
-        replay_action_file(args.ip, args.port, args.replay, scale=args.mouse_scale)
-        return
 
     state = KvmState(abs_mode=args.abs_mouse, screen_width=args.screen_width, screen_height=args.screen_height)
     sender = UdpSender(args.ip, args.port, state, rate=args.rate, jiggle=args.jiggle)
@@ -784,7 +1007,7 @@ def run_kvm(args):
             if args.abs_mouse:
                 print(f"🎯 [MODE] Absolute Mouse Recording Active ({args.screen_width}x{args.screen_height} → 0..32767)")
             print(f"👉 Press [{args.toggle.upper()}] to toggle KVM (mouse & keyboard → target machine).")
-            print(f"👉 Press [{args.record_key.upper()}] to Start / Stop Macro Recording (works with or without KVM active).")
+            print(f"👉 Press [{args.record_key.upper()}] to Start / Stop Macro Recording (.krec).")
             print("👉 Press [Ctrl+C] to exit.")
             print("\n💡 Tip: Press F8 first to enable KVM, then F9 to record actions on target.\n")
 
@@ -866,17 +1089,19 @@ def run_kvm(args):
                 if state.recording:
                     state.record_start_ms = time.time() * 1000
                     state.last_record_ms = 0
-                    state.recorded_lines.clear()
-                    print("\n🔴 [RECORD] Macro recording STARTED. Perform your actions...")
+                    state.recorded_events.clear()
+                    state.event_count = 0
+                    print("\n🔴 [RECORD] Macro recording STARTED (.krec)...")
                 else:
-                    # Flush any pending mouse accumulation before saving
                     state.flush_mouse_record_now()
                     state.rec_bucket_start_ms = 0
-                    filename = args.record_file or f"macro_{int(time.time())}.txt"
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.write("# ESP32-S3 Action Macro Recording\n")
-                        f.write("\n".join(state.recorded_lines) + "\n")
-                    print(f"\n⏹️ [RECORD] Macro recording STOPPED. Saved {len(state.recorded_lines)} actions to '{filename}'!")
+                    filename = args.record_file or f"macro_{int(time.time())}.krec"
+                    if not filename.lower().endswith(".krec"):
+                        filename += ".krec"
+                    krec_data = state.get_krec_bytes()
+                    with open(filename, 'wb') as f:
+                        f.write(krec_data)
+                    print(f"\n⏹️ [RECORD] Macro recording STOPPED. Saved {state.event_count} actions ({len(krec_data)} bytes) to '{filename}'!")
             return
 
         if getattr(key, 'char', None) == 'v' and (state.modifiers & (MOD_LCTRL | MOD_RCTRL)) and (state.modifiers & (MOD_LALT | MOD_RALT)):
@@ -908,7 +1133,8 @@ def run_kvm(args):
             with state.lock:
                 state.pressed_keys.add(hid_code)
                 state.kbd_dirty = True
-                state.add_record_line(f"key_down {hid_code}")
+                state.flush_mouse_record_now()
+                state.add_krec_raw_event(KREC_KEY_DOWN, flags=0, param1=hid_code)
 
     def on_key_release(key):
         if key in MODIFIER_KEYS:
@@ -933,7 +1159,8 @@ def run_kvm(args):
             with state.lock:
                 state.pressed_keys.discard(hid_code)
                 state.kbd_dirty = True
-                state.add_record_line(f"key_up {hid_code}")
+                state.flush_mouse_record_now()
+                state.add_krec_raw_event(KREC_KEY_UP, flags=0, param1=hid_code)
 
     def on_mouse_move(x, y):
         if not state.kvm_active:
@@ -972,12 +1199,13 @@ def run_kvm(args):
             btn_name = "forward"
 
         with state.lock:
+            state.flush_mouse_record_now()
             if pressed:
                 state.mouse_buttons |= btn_mask
-                state.add_record_line(f"mouse_button {btn_name} down")
+                state.add_krec_raw_event(KREC_MOUSE_BUTTON, flags=btn_mask, param1=1)
             else:
                 state.mouse_buttons &= ~btn_mask
-                state.add_record_line(f"mouse_button {btn_name} up")
+                state.add_krec_raw_event(KREC_MOUSE_BUTTON, flags=btn_mask, param1=2)
 
     def on_mouse_scroll(x, y, dx, dy):
         if not state.kvm_active:
@@ -995,7 +1223,7 @@ def run_kvm(args):
 
     print("\n✨ KVM Client is active!")
     print(f"👉 Press [{args.toggle.upper()}] to switch keyboard/mouse to target machine.")
-    print(f"👉 Press [{args.record_key.upper()}] to Start / Stop Action Macro Recording.")
+    print(f"👉 Press [{args.record_key.upper()}] to Start / Stop Action Macro Recording (.krec).")
     print("👉 Press [Ctrl+Alt+V] to paste clipboard text into target.")
     print("👉 Press [Ctrl+C] to exit.\n")
 
@@ -1014,18 +1242,25 @@ def run_kvm(args):
 # Entry Point
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="ESP32-S3 Wireless KVM Universal Client")
+    parser = argparse.ArgumentParser(description="ESP32-S3 Wireless KVM Universal Client & Macro Engine")
     parser.add_argument('--ip', default='192.168.4.1', help="Target ESP32 IP address (default: 192.168.4.1)")
     parser.add_argument('--port', type=int, default=DEFAULT_PORT, help="Target UDP port (default: 4210)")
     parser.add_argument('--rate', type=int, default=125, help="Packet rate in Hz (default: 125)")
     parser.add_argument('--toggle', default='f8', help="Toggle KVM hotkey: f8, f9, f10, f12, pause, scrolllock (default: f8)")
     parser.add_argument('--record-key', default='f9', help="Toggle Macro Recording hotkey (default: f9)")
-    parser.add_argument('--record-file', default='', help="Output filename for macro recording")
-    parser.add_argument('--replay', default='', help="Replay a recorded .txt action file")
+    parser.add_argument('--record-file', default='', help="Output filename for binary macro recording (.krec)")
+    parser.add_argument('--replay', default='', help="Replay a recorded .krec action file locally")
     parser.add_argument('--mouse-scale', type=float, default=1.0, help="Movement scaling multiplier for replay (default: 1.0)")
     parser.add_argument('--abs-mouse', action='store_true', help="Record coordinates in 0..32767 Absolute Mouse mode for 100% resolution independence")
     parser.add_argument('--screen-width', type=int, default=1920, help="Source screen width for absolute normalization (default: 1920)")
     parser.add_argument('--screen-height', type=int, default=1080, help="Source screen height for absolute normalization (default: 1080)")
+
+    # Converter & Inspector Tools
+    parser.add_argument('--view', default='', help="View and print the binary contents of a .krec file as a readable table")
+    parser.add_argument('--to-txt', default='', help="Convert a binary .krec file into a readable .txt file")
+    parser.add_argument('--to-krec', default='', help="Convert a readable .txt file into a binary .krec file")
+    parser.add_argument('-o', '--output', default='', help="Output file path for --to-txt or --to-krec")
+
     parser.add_argument('--exclusive', action='store_true', help="Enable exclusive capture mode")
     parser.add_argument('--jiggle', action='store_true', help="Enable subtle keep-awake mouse jiggler")
     parser.add_argument('--preview', action='store_true', help="Start screen capture preview HTTP server")
