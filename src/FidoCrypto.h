@@ -60,7 +60,8 @@ public:
     const std::vector<uint8_t> &userId,
     const String &userName,
     const String &userDisplayName,
-    FidoCredential &outCred
+    FidoCredential &outCred,
+    int algorithm = -7
   );
 
   static FidoCredential* findCredential(const std::vector<uint8_t> &credId);
@@ -87,6 +88,19 @@ public:
     const uint8_t *data,
     size_t dataLen,
     std::vector<uint8_t> &outDerSig
+  );
+
+  // Ed25519 (alg: -8 / EdDSA) helper functions
+  static bool generateEd25519KeyPair(
+    std::vector<uint8_t> &outPriv64,
+    std::vector<uint8_t> &outPub32
+  );
+
+  static bool signEd25519(
+    const std::vector<uint8_t> &privKey64,
+    const uint8_t *data,
+    size_t dataLen,
+    std::vector<uint8_t> &outSig64
   );
 
   static void sha256(const uint8_t *data, size_t len, uint8_t *out32);

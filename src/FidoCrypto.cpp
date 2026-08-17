@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include "esp_random.h"
+#include "sodium/crypto_sign_ed25519.h"
 
 static std::vector<FidoCredential> credentials;
 static uint32_t globalCounter = 1;
@@ -24,6 +25,33 @@ static const uint8_t ESP32_AAGUID[16] = {
 
 void FidoStore::getAaguid(uint8_t *out16) {
   memcpy(out16, ESP32_AAGUID, 16);
+}
+
+bool FidoStore::generateEd25519KeyPair(
+  std::vector<uint8_t> &outPriv64,
+  std::vector<uint8_t> &outPub32
+) {
+  outPriv64.resize(crypto_sign_ed25519_SECRETKEYBYTES); // 64 bytes
+  outPub32.resize(crypto_sign_ed25519_PUBLICKEYBYTES);  // 32 bytes
+
+  uint8_t seed[crypto_sign_ed25519_SEEDBYTES];
+  esp_fill_random(seed, crypto_sign_ed25519_SEEDBYTES);
+
+  int ret = crypto_sign_ed25519_seed_keypair(outPub32.data(), outPriv64.data(), seed);
+  return (ret == 0);
+}
+
+bool FidoStore::signEd25519(
+  const std::vector<uint8_t> &privKey64,
+  const uint8_t *data,
+  size_t dataLen,
+  std::vector<uint8_t> &outSig64
+) {
+  if (privKey64.size() != crypto_sign_ed25519_SECRETKEYBYTES || !data) return false;
+  outSig64.resize(crypto_sign_ed25519_BYTES); // 64 bytes
+  unsigned long long sigLen = 0;
+  int ret = crypto_sign_ed25519_detached(outSig64.data(), &sigLen, data, dataLen, privKey64.data());
+  return (ret == 0);
 }
 
 void FidoStore::sha256(const uint8_t *data, size_t len, uint8_t *out32) {
@@ -284,7 +312,8 @@ bool FidoStore::createCredential(
   const std::vector<uint8_t> &userId,
   const String &userName,
   const String &userDisplayName,
-  FidoCredential &outCred
+  FidoCredential &outCred,
+  int algorithm
 ) {
   outCred.rpId = rpId;
   outCred.userId = userId;
@@ -292,6 +321,7 @@ bool FidoStore::createCredential(
   outCred.userDisplayName = userDisplayName;
   outCred.signCounter = 0;
   outCred.createdAt = static_cast<uint32_t>(time(nullptr));
+  outCred.algorithm = (algorithm == -8) ? -8 : -7;
 
   // Generate unique 32-byte Credential ID
   outCred.credId.resize(32);
@@ -301,18 +331,26 @@ bool FidoStore::createCredential(
   outCred.hmacSecretKey.resize(32);
   esp_fill_random(outCred.hmacSecretKey.data(), 32);
 
-  // Generate secp256r1 keypair
-  if (!generateKeyPair(outCred.privKey, outCred.pubKeyX, outCred.pubKeyY)) {
-    return false;
+  if (outCred.algorithm == -8) { // EdDSA (Ed25519)
+    if (!generateEd25519KeyPair(outCred.privKey, outCred.pubKeyX)) {
+      return false;
+    }
+    outCred.pubKeyY.clear(); // Ed25519 public key fits entirely in pubKeyX (32 bytes)
+  } else { // ES256 (NIST P-256)
+    if (!generateKeyPair(outCred.privKey, outCred.pubKeyX, outCred.pubKeyY)) {
+      return false;
+    }
   }
 
-  // If a credential already exists for this RP and User, update it
+  // If a credential already exists for this RP and specific non-empty User ID, update it
   bool updated = false;
-  for (auto &existing : credentials) {
-    if (existing.rpId == rpId && existing.userId == userId) {
-      existing = outCred;
-      updated = true;
-      break;
+  if (!userId.empty()) {
+    for (auto &existing : credentials) {
+      if (existing.rpId.equalsIgnoreCase(rpId) && !existing.userId.empty() && existing.userId == userId) {
+        existing = outCred;
+        updated = true;
+        break;
+      }
     }
   }
 

@@ -71,16 +71,67 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
       }
     }
 
-    // Extract credProtect extension policy if present (default: 1)
-    pendingReq.requestedCredProtect = 1;
-    for (size_t i = 0; i + 12 < cborLen; i++) {
-      if (memcmp(cborPayload + i, "credProtect", 11) == 0) {
-        uint8_t nextVal = cborPayload[i + 11];
-        if (nextVal >= 0x01 && nextVal <= 0x03) {
-          pendingReq.requestedCredProtect = nextVal;
-        } else if (i + 12 < cborLen && cborPayload[i + 12] >= 0x01 && cborPayload[i + 12] <= 0x03) {
-          pendingReq.requestedCredProtect = cborPayload[i + 12];
+    // Extract requested extensions
+    pendingReq.requestedCredProps = false;
+    pendingReq.requestedCredProtect = false;
+    pendingReq.credProtectPolicy = 1;
+    for (size_t i = 0; i + 9 <= cborLen; i++) {
+      if (memcmp(cborPayload + i, "credProps", 9) == 0) {
+        pendingReq.requestedCredProps = true;
+      }
+      if (i + 11 <= cborLen && memcmp(cborPayload + i, "credProtect", 11) == 0) {
+        pendingReq.requestedCredProtect = true;
+        uint8_t nextVal = (i + 11 < cborLen) ? cborPayload[i + 11] : 1;
+        if (nextVal >= 1 && nextVal <= 3) {
+          pendingReq.credProtectPolicy = nextVal;
+        } else if (i + 12 < cborLen && cborPayload[i + 12] >= 1 && cborPayload[i + 12] <= 3) {
+          pendingReq.credProtectPolicy = cborPayload[i + 12];
         }
+      }
+    }
+
+    // Extract requested algorithm (-7 = ES256, -8 = EdDSA)
+    pendingReq.requestedAlgorithm = -7;
+    for (size_t i = 0; i + 4 < cborLen; i++) {
+      if (cborPayload[i] == 0x63 && cborPayload[i+1] == 'a' && cborPayload[i+2] == 'l' && cborPayload[i+3] == 'g') { // "alg"
+        if (i + 4 < cborLen && cborPayload[i+4] == 0x27) { // CBOR negative int -8
+          pendingReq.requestedAlgorithm = -8;
+          break;
+        }
+      }
+    }
+
+    // Extract User entity (Key 0x03)
+    for (size_t i = 0; i + 4 < cborLen; i++) {
+      if (cborPayload[i] == 0x64 && memcmp(cborPayload + i + 1, "name", 4) == 0) { // "name"
+        uint8_t t = (i + 5 < cborLen) ? cborPayload[i + 5] : 0;
+        if ((t & 0xE0) == 0x60) {
+          size_t sLen = t & 0x1F;
+          if (i + 6 + sLen <= cborLen) {
+            pendingReq.userName = String(reinterpret_cast<const char *>(cborPayload + i + 6)).substring(0, sLen);
+          }
+        }
+      }
+      if (cborPayload[i] == 0x62 && cborPayload[i+1] == 'i' && cborPayload[i+2] == 'd') { // "id"
+        if (i + 3 < cborLen && (cborPayload[i + 3] & 0xE0) == 0x40 && pendingReq.userId.empty()) {
+          size_t bLen = cborPayload[i + 3] & 0x1F;
+          if (cborPayload[i + 3] == 0x58 && i + 4 < cborLen) {
+            bLen = cborPayload[i + 4];
+            if (i + 5 + bLen <= cborLen) {
+              pendingReq.userId.assign(cborPayload + i + 5, cborPayload + i + 5 + bLen);
+            }
+          } else if (i + 4 + bLen <= cborLen) {
+            pendingReq.userId.assign(cborPayload + i + 4, cborPayload + i + 4 + bLen);
+          }
+        }
+      }
+    }
+
+    // Detect if PIN / UV auth token param is present (Key 0x08)
+    pendingReq.hasPinUvAuth = false;
+    for (size_t i = 0; i + 18 <= cborLen; i++) {
+      if (cborPayload[i] == 0x08 && cborPayload[i+1] == 0x50) {
+        pendingReq.hasPinUvAuth = true;
         break;
       }
     }
@@ -129,6 +180,15 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
       }
     }
 
+    // Detect if PIN / UV auth token param is present (Key 0x06)
+    pendingReq.hasPinUvAuth = false;
+    for (size_t i = 0; i + 18 <= cborLen; i++) {
+      if (cborPayload[i] == 0x06 && cborPayload[i+1] == 0x50) {
+        pendingReq.hasPinUvAuth = true;
+        break;
+      }
+    }
+
     // 4. Check if options.up == false (Silent presence check)
     pendingReq.upRequired = true;
     for (size_t i = 0; i + 3 < cborLen; i++) {
@@ -136,6 +196,12 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
         pendingReq.upRequired = false;
         break;
       }
+    }
+
+    if (!pendingReq.upRequired) {
+      // Probe / silent check: execute immediately without requiring physical touch
+      executeGetAssertion();
+      return;
     }
 
     // Await User Presence Touch (BOOT button)
@@ -165,13 +231,13 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
     return;
   }
 
-  if (ctap2Cmd == 0x0B) { // authenticatorLargeBlobs
-    handleLargeBlob(cborPayload, cborLen);
+  if (ctap2Cmd == 0x0A) { // authenticatorCredentialManagement (CTAP2 standard 0x0A)
+    handleCredentialManagement(cborPayload, cborLen);
     return;
   }
 
-  if (ctap2Cmd == 0x0C) { // authenticatorCredentialManagement
-    handleCredentialManagement(cborPayload, cborLen);
+  if (ctap2Cmd == 0x0C || ctap2Cmd == 0x0B) { // authenticatorLargeBlobs (CTAP2 standard 0x0C)
+    handleLargeBlob(cborPayload, cborLen);
     return;
   }
 
@@ -181,7 +247,7 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
 
 void FidoEngine::handleGetInfo() {
   CborWriter w;
-  w.writeMap(9);
+  w.writeMap(11);
 
   // 01: versions -> ["U2F_V2", "FIDO_2_0", "FIDO_2_1"]
   w.writeInt(0x01);
@@ -224,11 +290,25 @@ void FidoEngine::handleGetInfo() {
   w.writeArray(1);
   w.writeInt(1);
 
+  // 08: maxCredentialIdLength -> 128
+  w.writeInt(0x08);
+  w.writeInt(128);
+
   // 09: transports -> ["usb", "ble"]
   w.writeInt(0x09);
   w.writeArray(2);
   w.writeText("usb");
   w.writeText("ble");
+
+  // 0A (10): algorithms -> [{ "alg": -7, "type": "public-key" }, { "alg": -8, "type": "public-key" }]
+  w.writeInt(10);
+  w.writeArray(2);
+  w.writeMap(2);
+  w.writeText("alg"); w.writeInt(-7);
+  w.writeText("type"); w.writeText("public-key");
+  w.writeMap(2);
+  w.writeText("alg"); w.writeInt(-8);
+  w.writeText("type"); w.writeText("public-key");
 
   // 0B (11): maxLargeBlob -> 2048
   w.writeInt(11);
@@ -244,18 +324,41 @@ void FidoEngine::handleGetInfo() {
 void FidoEngine::executeMakeCredential() {
   FidoCredential cred;
   String rp = pendingReq.rpId.isEmpty() ? "webauthn.io" : pendingReq.rpId;
-  if (!FidoStore::createCredential(rp, pendingReq.userId, pendingReq.userName, pendingReq.userDisplayName, cred)) {
+  if (!FidoStore::createCredential(rp, pendingReq.userId, pendingReq.userName, pendingReq.userDisplayName, cred, pendingReq.requestedAlgorithm)) {
     sendResponse(CTAP2_ERR_OPERATION_DENIED, nullptr, 0);
     return;
   }
-  cred.credProtect = pendingReq.requestedCredProtect;
+  cred.credProtect = pendingReq.credProtectPolicy;
   FidoStore::saveToStorage();
 
   // Construct Authenticator Data
   uint8_t rpHash[32];
   FidoStore::sha256(reinterpret_cast<const uint8_t *>(cred.rpId.c_str()), cred.rpId.length(), rpHash);
 
-  uint8_t flags = FLAG_USER_PRESENT | (FidoStore::getEmulateUv() ? FLAG_USER_VERIFIED : 0) | FLAG_ATTESTED_CRED_DATA;
+  // Extension Data (embedded in authData ONLY when extensions were explicitly requested by client)
+  CborWriter extWriter;
+  size_t extCount = 0;
+  if (pendingReq.requestedCredProps) extCount++;
+  if (pendingReq.requestedCredProtect) extCount++;
+
+  bool hasExtensions = (extCount > 0);
+  if (hasExtensions) {
+    extWriter.writeMap(extCount);
+    // Canonical CBOR order: "credProps" (length 9) before "credProtect" (length 11)
+    if (pendingReq.requestedCredProps) {
+      extWriter.writeText("credProps");
+      extWriter.writeMap(1);
+      extWriter.writeText("rk");
+      extWriter.writeBool(true);
+    }
+    if (pendingReq.requestedCredProtect) {
+      extWriter.writeText("credProtect");
+      extWriter.writeInt(pendingReq.credProtectPolicy);
+    }
+  }
+
+  bool isUv = FidoStore::getEmulateUv() || pendingReq.hasPinUvAuth || FidoStore::isPinTokenValid() || FidoStore::isPinSet();
+  uint8_t flags = FLAG_USER_PRESENT | (isUv ? FLAG_USER_VERIFIED : 0) | FLAG_ATTESTED_CRED_DATA | (hasExtensions ? FLAG_EXTENSION_DATA : 0);
 
   uint32_t count = FidoStore::getNextGlobalCounter();
   uint8_t countBytes[4] = {
@@ -269,12 +372,20 @@ void FidoEngine::executeMakeCredential() {
   FidoStore::getAaguid(aaguid);
 
   CborWriter coseKey;
-  coseKey.writeMap(5);
-  coseKey.writeInt(1);  coseKey.writeInt(2);  // kty: 2 (EC2)
-  coseKey.writeInt(3);  coseKey.writeInt(-7); // alg: -7 (ES256)
-  coseKey.writeInt(-1); coseKey.writeInt(1);  // crv: 1 (P-256)
-  coseKey.writeInt(-2); coseKey.writeBytes(cred.pubKeyX.data(), 32); // x
-  coseKey.writeInt(-3); coseKey.writeBytes(cred.pubKeyY.data(), 32); // y
+  if (cred.algorithm == -8) { // EdDSA (Ed25519)
+    coseKey.writeMap(4);
+    coseKey.writeInt(1);  coseKey.writeInt(1);  // kty: 1 (OKP)
+    coseKey.writeInt(3);  coseKey.writeInt(-8); // alg: -8 (EdDSA)
+    coseKey.writeInt(-1); coseKey.writeInt(6);  // crv: 6 (Ed25519)
+    coseKey.writeInt(-2); coseKey.writeBytes(cred.pubKeyX.data(), 32); // x (32-byte public key)
+  } else { // ES256 (NIST P-256)
+    coseKey.writeMap(5);
+    coseKey.writeInt(1);  coseKey.writeInt(2);  // kty: 2 (EC2)
+    coseKey.writeInt(3);  coseKey.writeInt(-7); // alg: -7 (ES256)
+    coseKey.writeInt(-1); coseKey.writeInt(1);  // crv: 1 (P-256)
+    coseKey.writeInt(-2); coseKey.writeBytes(cred.pubKeyX.data(), 32); // x
+    coseKey.writeInt(-3); coseKey.writeBytes(cred.pubKeyY.data(), 32); // y
+  }
 
   std::vector<uint8_t> authData;
   authData.insert(authData.end(), rpHash, rpHash + 32);
@@ -285,42 +396,61 @@ void FidoEngine::executeMakeCredential() {
   authData.push_back(static_cast<uint8_t>(cred.credId.size()));
   authData.insert(authData.end(), cred.credId.begin(), cred.credId.end());
   authData.insert(authData.end(), coseKey.buf.begin(), coseKey.buf.end());
+  if (hasExtensions) {
+    authData.insert(authData.end(), extWriter.buf.begin(), extWriter.buf.end());
+  }
 
   // Sign: authData + clientDataHash
   std::vector<uint8_t> toSign = authData;
   toSign.insert(toSign.end(), pendingReq.clientDataHash.begin(), pendingReq.clientDataHash.end());
 
   std::vector<uint8_t> sig;
-  FidoStore::signData(cred.privKey, toSign.data(), toSign.size(), sig);
+  if (cred.algorithm == -8) {
+    FidoStore::signEd25519(cred.privKey, toSign.data(), toSign.size(), sig);
+  } else {
+    FidoStore::signData(cred.privKey, toSign.data(), toSign.size(), sig);
+  }
 
-  // Encode final CBOR response
+  // Encode standard CTAP2 MakeCredential CBOR response (fmt, authData, attStmt)
   CborWriter resp;
-  resp.writeMap(4);
+  resp.writeMap(3);
   resp.writeInt(0x01); resp.writeText("packed");
   resp.writeInt(0x02); resp.writeBytes(authData.data(), authData.size());
   resp.writeInt(0x03);
   resp.writeMap(2);
-  resp.writeText("alg"); resp.writeInt(-7);
+  resp.writeText("alg"); resp.writeInt(cred.algorithm);
   resp.writeText("sig"); resp.writeBytes(sig.data(), sig.size());
-  resp.writeInt(0x07);
-  resp.writeMap(1);
-  resp.writeText("credProps");
-  resp.writeMap(1);
-  resp.writeText("rk");
-  resp.writeBool(true);
 
   sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
 }
 
 void FidoEngine::executeGetAssertion() {
+  if (pendingReq.allowList.empty()) {
+    if (FidoStore::getAllCredentials().empty()) {
+      sendResponse(CTAP2_ERR_NO_CREDENTIALS, nullptr, 0);
+      return;
+    }
+  }
+
+  // Find matching credential
   FidoCredential *cred = nullptr;
   if (!pendingReq.allowList.empty()) {
-    for (auto &id : pendingReq.allowList) {
+    for (const auto &id : pendingReq.allowList) {
       cred = FidoStore::findCredential(id);
       if (cred) break;
     }
+    if (!cred) {
+      sendResponse(CTAP2_ERR_NO_CREDENTIALS, nullptr, 0);
+      return;
+    }
   } else if (!pendingReq.rpId.isEmpty()) {
-    cred = FidoStore::findCredentialByRp(pendingReq.rpId);
+    auto all = FidoStore::getAllCredentials();
+    for (auto &c : all) {
+      if (c.rpId.equalsIgnoreCase(pendingReq.rpId)) {
+        cred = FidoStore::findCredential(c.credId);
+        break;
+      }
+    }
   }
 
   if (!cred) {
@@ -328,8 +458,8 @@ void FidoEngine::executeGetAssertion() {
     return;
   }
 
-  // CredProtect Level 3 enforcement (userVerificationRequired)
-  if (cred->credProtect == 3) {
+  // Enforce credProtect policy if required
+  if (cred->credProtect == 2 || cred->credProtect == 3) {
     if (!FidoStore::getEmulateUv() && FidoStore::isPinSet() && !FidoStore::isPinTokenValid()) {
       sendResponse(CTAP2_ERR_PIN_REQUIRED, nullptr, 0);
       return;
@@ -340,7 +470,8 @@ void FidoEngine::executeGetAssertion() {
   uint8_t rpHash[32];
   String targetRp = pendingReq.rpId.isEmpty() ? cred->rpId : pendingReq.rpId;
   FidoStore::sha256(reinterpret_cast<const uint8_t *>(targetRp.c_str()), targetRp.length(), rpHash);
-  uint8_t flags = pendingReq.upRequired ? (FLAG_USER_PRESENT | (FidoStore::getEmulateUv() ? FLAG_USER_VERIFIED : 0)) : 0x00;
+  bool isUv = FidoStore::getEmulateUv() || pendingReq.hasPinUvAuth || FidoStore::isPinTokenValid() || FidoStore::isPinSet();
+  uint8_t flags = (pendingReq.upRequired ? FLAG_USER_PRESENT : 0) | (isUv ? FLAG_USER_VERIFIED : 0);
 
   uint32_t count = FidoStore::getNextGlobalCounter();
   cred->signCounter = count;
@@ -363,7 +494,11 @@ void FidoEngine::executeGetAssertion() {
   toSign.insert(toSign.end(), pendingReq.clientDataHash.begin(), pendingReq.clientDataHash.end());
 
   std::vector<uint8_t> sig;
-  FidoStore::signData(cred->privKey, toSign.data(), toSign.size(), sig);
+  if (cred->algorithm == -8) {
+    FidoStore::signEd25519(cred->privKey, toSign.data(), toSign.size(), sig);
+  } else {
+    FidoStore::signData(cred->privKey, toSign.data(), toSign.size(), sig);
+  }
 
   // Encode final CBOR response
   CborWriter resp;
@@ -395,14 +530,56 @@ void FidoEngine::executeGetAssertion() {
   sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
 }
 
-void FidoEngine::handleClientPin(const uint8_t *data, size_t len) {
-  if (len < 2) {
+static bool skipCborValue(const uint8_t *cbor, size_t cborLen, size_t &pos) {
+  if (pos >= cborLen) return false;
+  uint8_t initial = cbor[pos++];
+  uint8_t major = initial >> 5;
+  uint8_t info = initial & 0x1F;
+  size_t valLen = 0;
+
+  if (info < 24) {
+    valLen = info;
+  } else if (info == 24) {
+    if (pos >= cborLen) return false;
+    valLen = cbor[pos++];
+  } else if (info == 25) {
+    if (pos + 2 > cborLen) return false;
+    valLen = (static_cast<size_t>(cbor[pos]) << 8) | cbor[pos+1];
+    pos += 2;
+  } else if (info == 26) {
+    if (pos + 4 > cborLen) return false;
+    valLen = (static_cast<size_t>(cbor[pos]) << 24) | (static_cast<size_t>(cbor[pos+1]) << 16) | (static_cast<size_t>(cbor[pos+2]) << 8) | cbor[pos+3];
+    pos += 4;
+  } else if (info >= 28) {
+    return true; // simple value (true/false/null)
+  }
+
+  if (major == 0 || major == 1 || major == 7) {
+    return true;
+  } else if (major == 2 || major == 3) {
+    if (pos + valLen > cborLen) return false;
+    pos += valLen;
+    return true;
+  } else if (major == 4) {
+    for (size_t i = 0; i < valLen; i++) {
+      if (!skipCborValue(cbor, cborLen, pos)) return false;
+    }
+    return true;
+  } else if (major == 5) {
+    for (size_t i = 0; i < valLen; i++) {
+      if (!skipCborValue(cbor, cborLen, pos)) return false;
+      if (!skipCborValue(cbor, cborLen, pos)) return false;
+    }
+    return true;
+  }
+  return true;
+}
+
+void FidoEngine::handleClientPin(const uint8_t *cbor, size_t cborLen) {
+  if (cborLen < 1) {
     sendResponse(CTAP2_ERR_INVALID_PARAMETER, nullptr, 0);
     return;
   }
-
-  const uint8_t *cbor = data + 1;
-  size_t cborLen = len - 1;
 
   uint8_t protocol = 1;
   uint8_t subCmd = 0;
@@ -413,25 +590,72 @@ void FidoEngine::handleClientPin(const uint8_t *data, size_t len) {
   std::vector<uint8_t> pinHashEnc;
   std::vector<uint8_t> currentPinHashEnc;
 
-  if (cborLen >= 5 && (cbor[0] & 0xE0) == 0xA0 && cbor[1] == 0x01 && cbor[3] == 0x02) {
-    protocol = cbor[2];
-    subCmd = cbor[4];
-  }
-
-  for (size_t i = 0; i < cborLen; i++) {
-    if (i + 35 <= cborLen && cbor[i] == 0x21 && cbor[i+1] == 0x58 && cbor[i+2] == 0x20) {
-      peerPubX.assign(cbor + i + 3, cbor + i + 35);
-    } else if (i + 35 <= cborLen && cbor[i] == 0x22 && cbor[i+1] == 0x58 && cbor[i+2] == 0x20) {
-      peerPubY.assign(cbor + i + 3, cbor + i + 35);
-    } else if (i + 18 <= cborLen && cbor[i] == 0x04 && cbor[i+1] == 0x50) {
-      pinAuth.assign(cbor + i + 2, cbor + i + 18);
-    } else if (i + 67 <= cborLen && cbor[i] == 0x05 && cbor[i+1] == 0x58 && cbor[i+2] == 0x40) {
-      newPinEnc.assign(cbor + i + 3, cbor + i + 67);
-    } else if (i + 18 <= cborLen && cbor[i] == 0x06 && cbor[i+1] == 0x50) {
-      if (subCmd == 0x04) {
-        currentPinHashEnc.assign(cbor + i + 2, cbor + i + 18);
+  if (cborLen > 0 && (cbor[0] & 0xE0) == 0xA0) {
+    size_t mapSize = cbor[0] & 0x1F;
+    size_t pos = 1;
+    for (size_t k = 0; k < mapSize && pos < cborLen; k++) {
+      uint8_t key = cbor[pos++];
+      if (key == 0x01 && pos < cborLen) { // 1: pinUvAuthProtocol (uint)
+        protocol = cbor[pos++];
+      } else if (key == 0x02 && pos < cborLen) { // 2: subCommand (uint)
+        subCmd = cbor[pos++];
+      } else if (key == 0x03 && pos < cborLen) { // 3: keyAgreement (COSE map)
+        if ((cbor[pos] & 0xE0) == 0xA0) {
+          size_t innerMap = cbor[pos++] & 0x1F;
+          for (size_t ik = 0; ik < innerMap && pos < cborLen; ik++) {
+            uint8_t ikey = cbor[pos++];
+            if (ikey == 0x21 && pos + 33 <= cborLen) { // -2: x (32 bytes)
+              if (cbor[pos] == 0x58 && cbor[pos+1] == 0x20) {
+                peerPubX.assign(cbor + pos + 2, cbor + pos + 34);
+                pos += 34;
+              } else {
+                skipCborValue(cbor, cborLen, pos);
+              }
+            } else if (ikey == 0x22 && pos + 33 <= cborLen) { // -3: y (32 bytes)
+              if (cbor[pos] == 0x58 && cbor[pos+1] == 0x20) {
+                peerPubY.assign(cbor + pos + 2, cbor + pos + 34);
+                pos += 34;
+              } else {
+                skipCborValue(cbor, cborLen, pos);
+              }
+            } else {
+              skipCborValue(cbor, cborLen, pos);
+            }
+          }
+        } else {
+          skipCborValue(cbor, cborLen, pos);
+        }
+      } else if (key == 0x04 && pos < cborLen) { // 4: pinUvAuthParam (16 bytes)
+        if (cbor[pos] == 0x50 && pos + 17 <= cborLen) {
+          pinAuth.assign(cbor + pos + 1, cbor + pos + 17);
+          pos += 17;
+        } else if (cbor[pos] == 0x58 && cbor[pos+1] == 0x10 && pos + 18 <= cborLen) {
+          pinAuth.assign(cbor + pos + 2, cbor + pos + 18);
+          pos += 18;
+        } else {
+          skipCborValue(cbor, cborLen, pos);
+        }
+      } else if (key == 0x05 && pos < cborLen) { // 5: newPinEnc (64 bytes)
+        if (cbor[pos] == 0x58 && cbor[pos+1] == 0x40 && pos + 66 <= cborLen) {
+          newPinEnc.assign(cbor + pos + 2, cbor + pos + 66);
+          pos += 66;
+        } else {
+          skipCborValue(cbor, cborLen, pos);
+        }
+      } else if (key == 0x06 && pos < cborLen) { // 6: pinHashEnc / currentPinHashEnc (16 bytes)
+        if (cbor[pos] == 0x50 && pos + 17 <= cborLen) {
+          if (subCmd == 0x04) currentPinHashEnc.assign(cbor + pos + 1, cbor + pos + 17);
+          else pinHashEnc.assign(cbor + pos + 1, cbor + pos + 17);
+          pos += 17;
+        } else if (cbor[pos] == 0x58 && cbor[pos+1] == 0x10 && pos + 18 <= cborLen) {
+          if (subCmd == 0x04) currentPinHashEnc.assign(cbor + pos + 2, cbor + pos + 18);
+          else pinHashEnc.assign(cbor + pos + 2, cbor + pos + 18);
+          pos += 18;
+        } else {
+          skipCborValue(cbor, cborLen, pos);
+        }
       } else {
-        pinHashEnc.assign(cbor + i + 2, cbor + i + 18);
+        skipCborValue(cbor, cborLen, pos);
       }
     }
   }
@@ -467,9 +691,9 @@ void FidoEngine::handleClientPin(const uint8_t *data, size_t len) {
     resp.writeMap(1);
     resp.writeInt(0x01);
     resp.writeMap(5);
-    resp.writeInt(1);  resp.writeInt(2);
-    resp.writeInt(3);  resp.writeInt(-7);
-    resp.writeInt(-1); resp.writeInt(1);
+    resp.writeInt(1);  resp.writeInt(2);   // kty: 2 (EC2)
+    resp.writeInt(3);  resp.writeInt(-25); // alg: -25 (ECDH-ES w/ HKDF-256 per CTAP2 spec)
+    resp.writeInt(-1); resp.writeInt(1);   // crv: 1 (P-256)
     resp.writeInt(-2); resp.writeBytes(ecdhPubX.data(), 32);
     resp.writeInt(-3); resp.writeBytes(ecdhPubY.data(), 32);
     sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
@@ -563,7 +787,7 @@ void FidoEngine::handleClientPin(const uint8_t *data, size_t len) {
     return;
   }
 
-  if (subCmd == 0x05 || subCmd == 0x09) { // getPinToken
+  if (subCmd == 0x05 || subCmd == 0x06 || subCmd == 0x09) { // getPinToken / getPinUvAuthTokenUsingPinWithPermissions
     if (!FidoStore::isPinSet()) {
       sendResponse(CTAP2_ERR_PIN_NOT_SET, nullptr, 0);
       return;
@@ -601,17 +825,39 @@ void FidoEngine::handleClientPin(const uint8_t *data, size_t len) {
     return;
   }
 
-  sendResponse(CTAP2_ERR_UNSUPPORTED_OPTION, nullptr, 0);
-}
-
-void FidoEngine::handleLargeBlob(const uint8_t *data, size_t len) {
-  if (len < 2) {
-    sendResponse(CTAP2_ERR_INVALID_PARAMETER, nullptr, 0);
+  if (subCmd == 0x08) { // getPinUvAuthTokenUsingUvWithPermissions
+    if (peerPubX.size() != 32 || peerPubY.size() != 32) {
+      sendResponse(CTAP2_ERR_INVALID_PARAMETER, nullptr, 0);
+      return;
+    }
+    std::vector<uint8_t> sharedSecret;
+    if (!FidoStore::computeSharedSecret(ecdhPrivKey, peerPubX, peerPubY, sharedSecret)) {
+      sendResponse(CTAP2_ERR_OPERATION_DENIED, nullptr, 0);
+      return;
+    }
+    uint8_t pinToken[32];
+    FidoStore::getPinToken(pinToken);
+    std::vector<uint8_t> pinTokenEnc;
+    if (!FidoStore::aes256CbcEncrypt(sharedSecret.data(), nullptr, pinToken, 32, pinTokenEnc)) {
+      sendResponse(CTAP2_ERR_OPERATION_DENIED, nullptr, 0);
+      return;
+    }
+    CborWriter resp;
+    resp.writeMap(1);
+    resp.writeInt(0x02);
+    resp.writeBytes(pinTokenEnc.data(), pinTokenEnc.size());
+    sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
     return;
   }
 
-  const uint8_t *cbor = data + 1;
-  size_t cborLen = len - 1;
+  sendResponse(CTAP2_ERR_UNSUPPORTED_OPTION, nullptr, 0);
+}
+
+void FidoEngine::handleLargeBlob(const uint8_t *cbor, size_t cborLen) {
+  if (cborLen < 1) {
+    sendResponse(CTAP2_ERR_INVALID_PARAMETER, nullptr, 0);
+    return;
+  }
 
   uint32_t getLen = 0;
   bool isGet = false;
@@ -619,9 +865,10 @@ void FidoEngine::handleLargeBlob(const uint8_t *data, size_t len) {
   uint32_t length = 0;
   std::vector<uint8_t> setToWrite;
 
-  if ((cbor[0] & 0xE0) == 0xA0) {
+  if (cborLen > 0 && (cbor[0] & 0xE0) == 0xA0) {
+    size_t mapSize = cbor[0] & 0x1F;
     size_t pos = 1;
-    while (pos < cborLen) {
+    for (size_t k = 0; k < mapSize && pos < cborLen; k++) {
       uint8_t key = cbor[pos++];
       if (key == 0x01 && pos < cborLen) { // get (uint)
         isGet = true;
@@ -657,7 +904,7 @@ void FidoEngine::handleLargeBlob(const uint8_t *data, size_t len) {
           else if (b == 0x19 && pos + 1 < cborLen) { length = (static_cast<uint32_t>(cbor[pos]) << 8) | cbor[pos+1]; pos += 2; }
         }
       } else {
-        pos++;
+        skipCborValue(cbor, cborLen, pos);
       }
     }
   }
@@ -704,22 +951,28 @@ void FidoEngine::handleLargeBlob(const uint8_t *data, size_t len) {
   sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
 }
 
-void FidoEngine::handleCredentialManagement(const uint8_t *data, size_t len) {
-  if (len < 2) {
+void FidoEngine::handleCredentialManagement(const uint8_t *cbor, size_t cborLen) {
+  if (cborLen < 1) {
     sendResponse(CTAP2_ERR_INVALID_PARAMETER, nullptr, 0);
     return;
   }
-
-  const uint8_t *cbor = data + 1;
-  size_t cborLen = len - 1;
 
   uint8_t subCmd = 0;
   uint8_t targetRpHash[32];
   bool hasRpHash = false;
   std::vector<uint8_t> targetCredId;
 
-  if (cborLen >= 3 && (cbor[0] & 0xE0) == 0xA0 && cbor[1] == 0x01) {
-    subCmd = cbor[2];
+  if (cborLen > 0 && (cbor[0] & 0xE0) == 0xA0) {
+    size_t mapSize = cbor[0] & 0x1F;
+    size_t pos = 1;
+    for (size_t k = 0; k < mapSize && pos < cborLen; k++) {
+      uint8_t key = cbor[pos++];
+      if (key == 0x01 && pos < cborLen) {
+        subCmd = cbor[pos++];
+      } else {
+        skipCborValue(cbor, cborLen, pos);
+      }
+    }
   }
 
   for (size_t i = 0; i + 34 <= cborLen; i++) {

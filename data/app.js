@@ -3214,6 +3214,8 @@ async function loadFidoStatus() {
       managePinBtn.textContent = data.pin_set ? "🔑 Change / Remove PIN" : "🔑 Set PIN";
     }
 
+    loadKeePassStatus();
+
     const uvToggle = qs("fido-emulate-uv-toggle");
     const uvBadge = qs("fido-uv-badge");
     if (uvToggle) {
@@ -3532,6 +3534,137 @@ function bindFidoControls() {
       console.error("WebAuthn test error", err);
       setText("fido-status-msg", "Test result: " + (err.message || "Completed"));
       await loadFidoStatus();
+    }
+  });
+
+  bindKeePassControls();
+  bindBip39Controls();
+}
+
+async function loadKeePassStatus() {
+  try {
+    const res = await api("/api/keepass/status");
+    const data = await res.json();
+    const badge = qs("keepass-status-badge");
+    if (badge) {
+      if (data.configured) {
+        badge.className = "badge ok";
+        badge.textContent = "✅ Configured (Active)";
+      } else {
+        badge.className = "badge";
+        badge.textContent = "Not Configured";
+      }
+    }
+    if (data.secret_hex) setValue("keepass-secret-hex", data.secret_hex);
+    if (data.secret_base32) setValue("keepass-secret-b32", data.secret_base32);
+  } catch (_) {}
+}
+
+function bindKeePassControls() {
+  qs("keepass-generate-btn")?.addEventListener("click", async () => {
+    try {
+      setText("keepass-status-msg", "Generating random secret...");
+      const res = await api("/api/keepass/config", {
+        method: "POST",
+        body: JSON.stringify({ action: "generate" })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setValue("keepass-secret-hex", data.secret_hex);
+        setValue("keepass-secret-b32", data.secret_base32);
+        const badge = qs("keepass-status-badge");
+        if (badge) { badge.className = "badge ok"; badge.textContent = "✅ Configured (Active)"; }
+        setText("keepass-status-msg", "✅ New secret generated! Copy Base32 into KeePassXC.");
+      }
+    } catch (_) {
+      setText("keepass-status-msg", "Failed to generate secret.");
+    }
+  });
+
+  qs("keepass-save-btn")?.addEventListener("click", async () => {
+    const hex = qs("keepass-secret-hex")?.value.trim() || "";
+    if (hex.length !== 40) {
+      setText("keepass-status-msg", "Secret hex must be exactly 40 hex characters (20 bytes).");
+      return;
+    }
+    try {
+      setText("keepass-status-msg", "Saving secret...");
+      const res = await api("/api/keepass/config", {
+        method: "POST",
+        body: JSON.stringify({ action: "set", secret_hex: hex })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setValue("keepass-secret-b32", data.secret_base32);
+        const badge = qs("keepass-status-badge");
+        if (badge) { badge.className = "badge ok"; badge.textContent = "✅ Configured (Active)"; }
+        setText("keepass-status-msg", "✅ Secret saved to hardware flash!");
+      } else {
+        setText("keepass-status-msg", data.error || "Failed to save secret.");
+      }
+    } catch (_) {
+      setText("keepass-status-msg", "Network error.");
+    }
+  });
+
+  qs("keepass-clear-btn")?.addEventListener("click", async () => {
+    if (!confirm("Clear KeePassXC secret key?")) return;
+    try {
+      await api("/api/keepass/config", { method: "POST", body: JSON.stringify({ action: "clear" }) });
+      setValue("keepass-secret-hex", "");
+      setValue("keepass-secret-b32", "");
+      const badge = qs("keepass-status-badge");
+      if (badge) { badge.className = "badge"; badge.textContent = "Not Configured"; }
+      setText("keepass-status-msg", "Secret cleared.");
+    } catch (_) {}
+  });
+
+  qs("keepass-copy-hex")?.addEventListener("click", () => {
+    const val = qs("keepass-secret-hex")?.value || "";
+    if (val) {
+      navigator.clipboard.writeText(val);
+      setText("keepass-status-msg", "Hex secret copied to clipboard.");
+    }
+  });
+
+  qs("keepass-copy-b32")?.addEventListener("click", () => {
+    const val = qs("keepass-secret-b32")?.value || "";
+    if (val) {
+      navigator.clipboard.writeText(val);
+      setText("keepass-status-msg", "Base32 secret copied to clipboard! (Paste into KeePassXC)");
+    }
+  });
+}
+
+function bindBip39Controls() {
+  qs("bip39-generate-btn")?.addEventListener("click", async () => {
+    try {
+      setText("bip39-status-msg", "Generating 256-bit entropy from hardware TRNG...");
+      const res = await api("/api/bip39/generate");
+      const data = await res.json();
+      if (data.ok && data.mnemonic) {
+        const box = qs("bip39-phrase-box");
+        const grid = qs("bip39-grid");
+        if (box && grid) {
+          grid.innerHTML = "";
+          const words = data.mnemonic.split(" ");
+          words.forEach((w, idx) => {
+            const chip = document.createElement("div");
+            chip.style.cssText = "background:rgba(168,85,247,0.1); border:1px solid rgba(168,85,247,0.25); border-radius:6px; padding:6px 10px; font-family:monospace; font-size:0.82rem;";
+            chip.innerHTML = `<span style="color:var(--muted); font-size:10px; margin-right:6px;">${idx + 1}.</span><strong>${escapeHtml(w)}</strong>`;
+            grid.appendChild(chip);
+          });
+          box.classList.remove("hidden");
+        }
+        setText("bip39-status-msg", "✅ 24-word recovery phrase generated!");
+
+        qs("bip39-copy-phrase")?.addEventListener("click", () => {
+          navigator.clipboard.writeText(data.mnemonic);
+          setText("bip39-status-msg", "24-word phrase copied to clipboard.");
+        });
+      }
+    } catch (_) {
+      setText("bip39-status-msg", "Failed to generate mnemonic.");
     }
   });
 }

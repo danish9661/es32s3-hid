@@ -231,6 +231,65 @@
               </div>
               <div id="vault-backup-status-msg" class="status-line" style="margin-top:8px;"></div>
             </div>
+
+            <!-- KeePassXC Challenge-Response Card -->
+            <div class="network-info-card" style="margin-top:20px; background:rgba(245,158,11,0.03); border-color:rgba(245,158,11,0.2);">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px;">
+                    <span>🔑 KeePassXC Physical Challenge-Response</span>
+                    <span id="keepass-status-badge" class="badge">Not Configured</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Use your ESP32-S3 as a physical YubiKey-compatible key to unlock local KeePassXC password databases (HMAC-SHA1).</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <button type="button" id="keepass-generate-btn" class="btn-primary btn-sm" style="background:#f59e0b; border-color:#f59e0b; color:#070b14;">🎲 Generate Secret</button>
+                  <button type="button" id="keepass-clear-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">Clear</button>
+                </div>
+              </div>
+              <div id="keepass-config-section" style="margin-top:12px; display:grid; gap:10px;">
+                <div>
+                  <label class="label">Secret Key (Hex 40 chars / 20 bytes)</label>
+                  <div class="token-row">
+                    <input class="input" id="keepass-secret-hex" placeholder="Click 'Generate Secret' or enter 40 hex chars..." style="font-family:monospace; font-size:0.82rem;">
+                    <button class="btn-outline btn-sm" id="keepass-save-btn">Save</button>
+                    <button class="btn-outline btn-sm" id="keepass-copy-hex">Copy</button>
+                  </div>
+                </div>
+                <div>
+                  <label class="label">Base32 Secret (for KeePassXC setup dialog)</label>
+                  <div class="token-row">
+                    <input class="input" id="keepass-secret-b32" readonly placeholder="Base32 secret will appear here..." style="font-family:monospace; font-size:0.82rem;">
+                    <button class="btn-outline btn-sm" id="keepass-copy-b32">Copy Base32</button>
+                  </div>
+                </div>
+              </div>
+              <div id="keepass-status-msg" class="status-line" style="margin-top:8px;"></div>
+            </div>
+
+            <!-- BIP-39 24-Word Mnemonic Recovery Phrase Card -->
+            <div class="network-info-card" style="margin-top:20px; background:rgba(168,85,247,0.03); border-color:rgba(168,85,247,0.2);">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px;">
+                    <span>📜 BIP-39 24-Word Recovery Phrase</span>
+                    <span class="badge ok">Hardware TRNG</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Generate an offline 24-word paper seed phrase to deterministically backup and recover your master security key.</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <button type="button" id="bip39-generate-btn" class="btn-primary btn-sm" style="background:#a855f7; border-color:#a855f7; color:#ffffff;">🔀 Generate 24 Words</button>
+                </div>
+              </div>
+              <div id="bip39-phrase-box" class="hidden" style="margin-top:12px; background:rgba(0,0,0,0.3); border:1px solid rgba(168,85,247,0.3); border-radius:8px; padding:14px;">
+                <div id="bip39-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:8px;"></div>
+                <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
+                  <span class="small" style="color:var(--muted);">⚠️ Write down these 24 words in order and keep them in a safe place.</span>
+                  <button class="btn-outline btn-sm" id="bip39-copy-phrase">Copy All 24 Words</button>
+                </div>
+              </div>
+              <div id="bip39-status-msg" class="status-line" style="margin-top:8px;"></div>
+            </div>
           </div>
 
           <!-- Passkey Inspector Modal -->

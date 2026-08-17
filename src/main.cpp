@@ -24,6 +24,8 @@
 #include "mbedtls/sha256.h"
 #include "mbedtls/md.h"
 #include "mbedtls/base64.h"
+#include "KeePassXC.h"
+#include "Bip39.h"
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
 #include <cstring>
@@ -5122,6 +5124,113 @@ void registerRoutes() {
       }
     }
   );
+
+  // --- KEEPASSXC CHALLENGE-RESPONSE ROUTES ---
+  server.on("/api/keepass/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    DynamicJsonDocument doc(512);
+    doc["configured"] = KeePassXC::isConfigured();
+    doc["secret_hex"] = KeePassXC::getSecretHex();
+    doc["secret_base32"] = KeePassXC::getSecretBase32();
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on("/api/keepass/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      String action = doc["action"] | "";
+
+      if (action == "generate") {
+        uint8_t sec[20];
+        KeePassXC::generateRandomSecret(sec);
+        logSystem("[KeePassXC] New random Challenge-Response secret generated");
+        request->send(200, "application/json", "{\"ok\":true,\"configured\":true,\"secret_hex\":\"" + KeePassXC::getSecretHex() + "\",\"secret_base32\":\"" + KeePassXC::getSecretBase32() + "\"}");
+        return;
+      }
+
+      if (action == "clear") {
+        KeePassXC::clearSecret();
+        logSystem("[KeePassXC] Challenge-Response secret cleared");
+        request->send(200, "application/json", "{\"ok\":true,\"cleared\":true}");
+        return;
+      }
+
+      if (action == "set") {
+        String secretHex = doc["secret_hex"] | "";
+        bool ok = KeePassXC::setSecretHex(secretHex);
+        if (ok) {
+          logSystem("[KeePassXC] Challenge-Response secret saved");
+          request->send(200, "application/json", "{\"ok\":true,\"configured\":true,\"secret_hex\":\"" + KeePassXC::getSecretHex() + "\",\"secret_base32\":\"" + KeePassXC::getSecretBase32() + "\"}");
+        } else {
+          request->send(400, "application/json", "{\"error\":\"Invalid secret hex (must be exactly 40 hex characters / 20 bytes)\"}");
+        }
+        return;
+      }
+
+      request->send(400, "application/json", "{\"error\":\"Invalid action\"}");
+    }
+  );
+
+  server.on("/api/keepass/test", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      String challengeHex = doc["challenge"] | "";
+
+      if (!KeePassXC::isConfigured()) {
+        request->send(400, "application/json", "{\"error\":\"KeePassXC secret not configured\"}");
+        return;
+      }
+
+      std::vector<uint8_t> chBytes;
+      for (size_t i = 0; i + 1 < challengeHex.length(); i += 2) {
+        char sub[3] = { challengeHex[i], challengeHex[i+1], '\0' };
+        chBytes.push_back(static_cast<uint8_t>(strtol(sub, nullptr, 16)));
+      }
+
+      uint8_t resp20[20];
+      bool ok = KeePassXC::computeResponse(chBytes.data(), chBytes.size(), resp20);
+      if (ok) {
+        String respHex = "";
+        for (int i = 0; i < 20; i++) {
+          char buf[3];
+          snprintf(buf, sizeof(buf), "%02x", resp20[i]);
+          respHex += buf;
+        }
+        request->send(200, "application/json", "{\"ok\":true,\"response\":\"" + respHex + "\"}");
+      } else {
+        request->send(500, "application/json", "{\"error\":\"Computation failed\"}");
+      }
+    }
+  );
+
+  // --- BIP-39 24-WORD RECOVERY PHRASE ROUTES ---
+  server.on("/api/bip39/generate", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    String mnemonic = Bip39::generateMnemonic24();
+    DynamicJsonDocument doc(512);
+    doc["ok"] = true;
+    doc["mnemonic"] = mnemonic;
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  server.on("/api/bip39/validate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      String mnemonic = doc["mnemonic"] | "";
+      bool valid = Bip39::validateMnemonic(mnemonic);
+      request->send(200, "application/json", valid ? "{\"ok\":true,\"valid\":true}" : "{\"ok\":true,\"valid\":false,\"error\":\"Invalid 24-word checksum or unrecognized word\"}");
+    }
+  );
 }
 
 void setup() {
@@ -5150,6 +5259,7 @@ void setup() {
     }
   }
 
+  KeePassXC::init();
   ensureScriptDir();
   ensureActionsDir();
   loadSettings();
