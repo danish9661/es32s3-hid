@@ -2907,8 +2907,35 @@ uint8_t parseMouseButton(const String &name) {
 }
 
 void registerRoutes() {
-  server.serveStatic("/styles.css", LittleFS, "/styles.css").setCacheControl("no-cache, must-revalidate");
-  server.serveStatic("/app.js", LittleFS, "/app.js").setCacheControl("no-cache, must-revalidate");
+  server.on("/styles.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/styles.css.gz") && request->hasHeader("Accept-Encoding") && request->header("Accept-Encoding").indexOf("gzip") >= 0) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/styles.css.gz", "text/css");
+      response->addHeader("Content-Encoding", "gzip");
+      response->addHeader("Cache-Control", "public, max-age=86400");
+      request->send(response);
+    } else if (LittleFS.exists("/styles.css")) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/styles.css", "text/css");
+      response->addHeader("Cache-Control", "public, max-age=86400");
+      request->send(response);
+    } else {
+      request->send(404, "text/plain", "styles.css not found");
+    }
+  });
+
+  server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/app.js.gz") && request->hasHeader("Accept-Encoding") && request->header("Accept-Encoding").indexOf("gzip") >= 0) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.js.gz", "application/javascript");
+      response->addHeader("Content-Encoding", "gzip");
+      response->addHeader("Cache-Control", "public, max-age=86400");
+      request->send(response);
+    } else if (LittleFS.exists("/app.js")) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.js", "application/javascript");
+      response->addHeader("Cache-Control", "public, max-age=86400");
+      request->send(response);
+    } else {
+      request->send(404, "text/plain", "app.js not found");
+    }
+  });
 
   server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (LittleFS.exists("/favicon.ico")) {
@@ -2954,9 +2981,16 @@ void registerRoutes() {
       return;
     }
 
-    AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.html", "text/html");
-    response->addHeader("Cache-Control", "no-cache, must-revalidate");
-    request->send(response);
+    if (LittleFS.exists("/app.html.gz") && request->hasHeader("Accept-Encoding") && request->header("Accept-Encoding").indexOf("gzip") >= 0) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.html.gz", "text/html");
+      response->addHeader("Content-Encoding", "gzip");
+      response->addHeader("Cache-Control", "no-cache, must-revalidate");
+      request->send(response);
+    } else {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/app.html", "text/html");
+      response->addHeader("Cache-Control", "no-cache, must-revalidate");
+      request->send(response);
+    }
   });
 
   server.on("/api/login_status", HTTP_GET, [](AsyncWebServerRequest *request) {
