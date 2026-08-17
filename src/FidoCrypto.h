@@ -126,6 +126,13 @@ public:
 
   static void getPinToken(uint8_t *out32);
   static bool verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pinAuth16);
+
+  // Biometric UV Emulation
+  static bool getEmulateUv();
+  static void setEmulateUv(bool enable);
+
+  // Backup & Import
+  static void importCredentials(const std::vector<FidoCredential> &list, bool replace = true);
 };
 
 struct CborWriter {

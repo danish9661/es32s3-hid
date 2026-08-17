@@ -546,6 +546,13 @@ function setText(id, text) {
   }
 }
 
+function setValue(id, val) {
+  const el = qs(id);
+  if (el) {
+    el.value = val;
+  }
+}
+
 function setStatusMsg(id, text, type = "") {
   const el = qs(id);
   if (!el) return;
@@ -1834,32 +1841,65 @@ function bindOtaControls() {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", targetUrl, true);
 
+    let uploadPercent = 0;
+    let uploadFinished = false;
+
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        if (progressBar) progressBar.style.width = pct + "%";
+        uploadPercent = Math.round((e.loaded / e.total) * 100);
+        if (progressBar) progressBar.style.width = uploadPercent + "%";
         const elapsedSec = Math.max((Date.now() - startTime) / 1000, 0.1);
         const speedKB = Math.round((e.loaded / 1024) / elapsedSec);
-        if (progressText) progressText.textContent = `Flashing: ${pct}% (${(e.loaded / 1024).toFixed(0)} / ${(e.total / 1024).toFixed(0)} KB)`;
+        if (progressText) progressText.textContent = `Flashing: ${uploadPercent}% (${(e.loaded / 1024).toFixed(0)} / ${(e.total / 1024).toFixed(0)} KB)`;
         if (speedText) speedText.textContent = `${speedKB} KB/s`;
       }
     };
 
+    const startReconnectRoutine = () => {
+      if (uploadFinished) return;
+      uploadFinished = true;
+
+      if (progressBar) progressBar.style.width = "100%";
+      if (progressText) progressText.textContent = "Flash Complete! Rebooting...";
+      if (statusSpan) statusSpan.textContent = "Device is rebooting. Waiting for reconnection...";
+
+      let attempts = 0;
+      const maxAttempts = 20;
+
+      // Wait 3 seconds for reboot, then actively poll every 1.5s
+      setTimeout(() => {
+        const pingInterval = setInterval(async () => {
+          attempts++;
+          if (statusSpan) statusSpan.textContent = `Reconnecting to ESP32-S3 (attempt ${attempts}/${maxAttempts})...`;
+
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 1200);
+            const res = await fetch("/api/login_status?t=" + Date.now(), { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (res.ok || res.status === 401 || res.status === 403) {
+              clearInterval(pingInterval);
+              if (statusSpan) statusSpan.textContent = "✅ Reconnected! Refreshing application...";
+              setTimeout(() => {
+                window.location.replace("/login?v=" + Date.now());
+              }, 600);
+              return;
+            }
+          } catch (_) {}
+
+          if (attempts >= maxAttempts) {
+            clearInterval(pingInterval);
+            if (statusSpan) statusSpan.textContent = "Reboot finished. Redirecting...";
+            window.location.replace("/login?v=" + Date.now());
+          }
+        }, 1500);
+      }, 3000);
+    };
+
     xhr.onload = () => {
       if (xhr.status === 200) {
-        if (progressBar) progressBar.style.width = "100%";
-        if (progressText) progressText.textContent = "Flash Complete! Rebooting...";
-        if (statusSpan) statusSpan.textContent = "Device is rebooting. Reconnecting in 6 seconds...";
-
-        let countdown = 6;
-        const countTimer = setInterval(() => {
-          countdown--;
-          if (statusSpan) statusSpan.textContent = `Flash complete! Rebooting... redirecting in ${countdown}s`;
-          if (countdown <= 0) {
-            clearInterval(countTimer);
-            window.location.replace("/login");
-          }
-        }, 1000);
+        startReconnectRoutine();
       } else {
         flashBtn.disabled = false;
         if (statusSpan) statusSpan.textContent = "OTA Update failed. Check binary size and format.";
@@ -1867,8 +1907,12 @@ function bindOtaControls() {
     };
 
     xhr.onerror = () => {
-      flashBtn.disabled = false;
-      if (statusSpan) statusSpan.textContent = "Network error during OTA upload.";
+      if (uploadPercent >= 99) {
+        startReconnectRoutine();
+      } else {
+        flashBtn.disabled = false;
+        if (statusSpan) statusSpan.textContent = "Network error during OTA upload.";
+      }
     };
 
     const formData = new FormData();
@@ -2965,8 +3009,8 @@ async function refreshVaultView() {
       setupCard?.classList.add("hidden");
       lockedCard?.classList.add("hidden");
       unlockedCard?.classList.remove("hidden");
-      await loadVaultEntries();
       await loadFidoStatus();
+      await loadVaultEntries();
       startVaultTicker();
     }
   } catch (_) {
@@ -3016,6 +3060,9 @@ function renderVaultEntries() {
   }
   emptyState?.classList.add("hidden");
 
+  const isPasskeyMode = !!currentFidoState.security_key_mode;
+  const disabledTypeAttr = isPasskeyMode ? 'disabled title="USB Keyboard typing is disabled in Dedicated Passkey Mode. Switch to Normal Ducky Mode to type." style="opacity:0.4; cursor:not-allowed;"' : '';
+
   filtered.forEach((item) => {
     const card = document.createElement("div");
     card.className = "vault-item";
@@ -3043,7 +3090,7 @@ function renderVaultEntries() {
           <span class="totp-timer" id="otp-timer-${item.id}">${remaining}s</span>
         </div>
         <div class="vault-item-actions">
-          <button class="btn-primary btn-sm" data-vault-type="otp" data-vault-id="${item.id}">Type Code + ↵</button>
+          <button class="btn-primary btn-sm" ${disabledTypeAttr} data-vault-type="otp" data-vault-id="${item.id}">Type Code + ↵</button>
           <button class="btn-outline btn-sm" data-vault-copy="otp" data-vault-code="${otpCode}">Copy</button>
           <button class="btn-outline btn-sm" data-vault-edit="${item.id}">Edit</button>
           <button class="btn-danger btn-sm" data-vault-del="${item.id}">Delete</button>
@@ -3057,9 +3104,9 @@ function renderVaultEntries() {
           <div style="margin-top:4px;">Pass: <span id="pass-text-${item.id}">${maskedPass}</span></div>
         </div>
         <div class="vault-item-actions">
-          <button class="btn-primary btn-sm" data-vault-type="both" data-vault-id="${item.id}">Type Both + ↵</button>
-          <button class="btn-outline btn-sm" data-vault-type="pass" data-vault-id="${item.id}">Type Pass</button>
-          <button class="btn-outline btn-sm" data-vault-type="user" data-vault-id="${item.id}">Type User</button>
+          <button class="btn-primary btn-sm" ${disabledTypeAttr} data-vault-type="both" data-vault-id="${item.id}">Type Both + ↵</button>
+          <button class="btn-outline btn-sm" ${disabledTypeAttr} data-vault-type="pass" data-vault-id="${item.id}">Type Pass</button>
+          <button class="btn-outline btn-sm" ${disabledTypeAttr} data-vault-type="user" data-vault-id="${item.id}">Type User</button>
           <button class="btn-outline btn-sm" data-vault-reveal="${item.id}">Reveal</button>
           <button class="btn-outline btn-sm" data-vault-edit="${item.id}">Edit</button>
           <button class="btn-danger btn-sm" data-vault-del="${item.id}">Delete</button>
@@ -3122,16 +3169,19 @@ function renderVaultEntries() {
 }
 
 // --- FIDO2 / WEBAUTHN PASSKEYS DASHBOARD ---
+let currentFidoState = { pin_set: false, pin_retries: 8 };
+
 async function loadFidoStatus() {
   const list = qs("fido-passkeys-list");
   const touchBadge = qs("fido-touch-badge");
   const pinBadge = qs("fido-pin-badge");
-  const clearPinBtn = qs("fido-clear-pin-btn");
+  const managePinBtn = qs("fido-manage-pin-btn");
   if (!list) return;
   try {
     const res = await api("/api/fido/status");
     if (!res.ok) return;
     const data = await res.json();
+    currentFidoState = data;
 
     const modeBadge = qs("fido-mode-badge");
     const toggleBtn = qs("fido-toggle-mode-btn");
@@ -3160,8 +3210,23 @@ async function loadFidoStatus() {
       }
     }
 
-    if (clearPinBtn) {
-      clearPinBtn.classList.toggle("hidden", !data.pin_set);
+    if (managePinBtn) {
+      managePinBtn.textContent = data.pin_set ? "🔑 Change / Remove PIN" : "🔑 Set PIN";
+    }
+
+    const uvToggle = qs("fido-emulate-uv-toggle");
+    const uvBadge = qs("fido-uv-badge");
+    if (uvToggle) {
+      uvToggle.checked = !!data.emulate_uv;
+    }
+    if (uvBadge) {
+      if (data.emulate_uv) {
+        uvBadge.className = "badge ok";
+        uvBadge.textContent = "⚡ Emulated UV=true";
+      } else {
+        uvBadge.className = "badge";
+        uvBadge.textContent = "Standard UV=false";
+      }
     }
 
     if (touchBadge) {
@@ -3191,11 +3256,18 @@ async function loadFidoStatus() {
             <div class="small" style="color:var(--muted); font-size:11px;">User: ${escapeHtml(c.userName || "N/A")} • Counter: ${c.signCounter}</div>
           </div>
         </div>
-        <div style="display:flex; align-items:center; gap:8px;">
+        <div style="display:flex; align-items:center; gap:6px;">
           <span class="badge ok" style="font-size:10px;">Hardware Resident</span>
+          <button type="button" class="btn-outline btn-sm fido-inspect-cred-btn" style="font-size:10px; padding:2px 8px; color:#00f3ff; border-color:rgba(0,243,255,0.3);">👁️ Details</button>
           <button type="button" class="btn-outline btn-sm fido-del-cred-btn" data-id="${escapeHtml(c.credId || '')}" style="color:var(--danger); border-color:rgba(244,63,94,0.3); font-size:10px; padding:2px 6px;">🗑️</button>
         </div>
       `;
+
+      const inspectBtn = item.querySelector(".fido-inspect-cred-btn");
+      inspectBtn?.addEventListener("click", () => {
+        openFidoInspectModal(c);
+      });
+
       const delBtn = item.querySelector(".fido-del-cred-btn");
       delBtn?.addEventListener("click", async () => {
         if (!confirm(`Delete passkey for ${c.rpId}?`)) return;
@@ -3215,6 +3287,41 @@ async function loadFidoStatus() {
   } catch (_) {}
 }
 
+function openFidoInspectModal(c) {
+  const modal = qs("fido-inspect-modal");
+  if (!modal) return;
+
+  setText("inspect-rp-id", c.rpId || "N/A");
+  setText("inspect-user-name", c.userName || "N/A");
+  setText("inspect-display-name", c.userDisplayName || "N/A");
+  setText("inspect-sign-counter", String(c.signCounter ?? 0));
+  setText("inspect-created-at", c.createdAt ? new Date(c.createdAt * 1000).toLocaleString() : "N/A");
+
+  setValue("inspect-cred-id", c.credId || "N/A");
+  if (c.pubKeyX && c.pubKeyY) {
+    setValue("inspect-pub-key", `X: ${c.pubKeyX}\nY: ${c.pubKeyY}`);
+  } else {
+    setValue("inspect-pub-key", "N/A");
+  }
+
+  const hmacBadge = qs("inspect-hmac-badge");
+  if (hmacBadge) {
+    if (c.hasHmacSecret) {
+      hmacBadge.className = "badge ok";
+      hmacBadge.textContent = "✅ Supported (WebAuthn PRF Enabled)";
+    } else {
+      hmacBadge.className = "badge";
+      hmacBadge.textContent = "Standard Credential";
+    }
+  }
+
+  modal.classList.remove("hidden");
+}
+
+function closeFidoInspectModal() {
+  qs("fido-inspect-modal")?.classList.add("hidden");
+}
+
 function bindFidoControls() {
   qs("fido-toggle-mode-btn")?.addEventListener("click", async () => {
     try {
@@ -3230,14 +3337,86 @@ function bindFidoControls() {
 
   qs("fido-refresh-btn")?.addEventListener("click", loadFidoStatus);
 
-  qs("fido-clear-pin-btn")?.addEventListener("click", async () => {
-    if (!confirm("Clear and remove the Security Key PIN? Stored passkeys will be preserved.")) return;
+  // PIN Management Modal Controls
+  const pinModal = qs("fido-pin-modal");
+  const openPinModal = () => {
+    if (!pinModal) return;
+    const isSet = currentFidoState.pin_set;
+    setText("fido-pin-modal-title", isSet ? "🔑 Change Security Key PIN" : "🔑 Set Security Key PIN");
+    setText("fido-pin-modal-desc", isSet ? "Update your existing PIN or remove it." : "Set a new 4-8 digit hardware PIN to protect your passkeys.");
+    qs("fido-current-pin-group")?.classList.toggle("hidden", !isSet);
+    qs("fido-remove-pin-btn")?.classList.toggle("hidden", !isSet);
+    
+    setValue("fido-input-current-pin", "");
+    setValue("fido-input-new-pin", "");
+    setValue("fido-input-confirm-pin", "");
+    setText("fido-pin-status-msg", "");
+    pinModal.classList.remove("hidden");
+  };
+
+  const closePinModal = () => {
+    pinModal?.classList.add("hidden");
+  };
+
+  qs("fido-manage-pin-btn")?.addEventListener("click", openPinModal);
+  qs("fido-pin-modal-close")?.addEventListener("click", closePinModal);
+  qs("fido-pin-cancel-btn")?.addEventListener("click", closePinModal);
+
+  qs("fido-save-pin-btn")?.addEventListener("click", async () => {
+    const isSet = currentFidoState.pin_set;
+    const currentPin = qs("fido-input-current-pin")?.value.trim() || "";
+    const newPin = qs("fido-input-new-pin")?.value.trim() || "";
+    const confirmPin = qs("fido-input-confirm-pin")?.value.trim() || "";
+
+    if (isSet && !currentPin) {
+      setText("fido-pin-status-msg", "Please enter your current PIN.");
+      return;
+    }
+    if (newPin.length < 4) {
+      setText("fido-pin-status-msg", "New PIN must be at least 4 digits.");
+      return;
+    }
+    if (newPin !== confirmPin) {
+      setText("fido-pin-status-msg", "New PIN and confirmation do not match.");
+      return;
+    }
+
     try {
-      await api("/api/fido/pin/clear", { method: "POST" });
-      setText("fido-status-msg", "Security Key PIN removed successfully.");
+      setText("fido-pin-status-msg", "Saving PIN to hardware vault...");
+      const res = await api("/api/fido/pin", {
+        method: "POST",
+        body: JSON.stringify({ action: "set", currentPin, newPin })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setText("fido-pin-status-msg", data.error || "Failed to update PIN.");
+        return;
+      }
+      setText("fido-status-msg", "✅ Security Key PIN updated successfully!");
+      closePinModal();
+      await loadFidoStatus();
+    } catch (err) {
+      setText("fido-pin-status-msg", "Error updating PIN.");
+    }
+  });
+
+  qs("fido-remove-pin-btn")?.addEventListener("click", async () => {
+    if (!confirm("Are you sure you want to remove the PIN? Your passkeys will remain usable without a PIN.")) return;
+    try {
+      setText("fido-pin-status-msg", "Removing PIN...");
+      const res = await api("/api/fido/pin", {
+        method: "POST",
+        body: JSON.stringify({ action: "remove" })
+      });
+      if (!res.ok) {
+        setText("fido-pin-status-msg", "Failed to remove PIN.");
+        return;
+      }
+      setText("fido-status-msg", "✅ Security Key PIN removed.");
+      closePinModal();
       await loadFidoStatus();
     } catch (_) {
-      setText("fido-status-msg", "Failed to clear PIN.");
+      setText("fido-pin-status-msg", "Error removing PIN.");
     }
   });
 
@@ -3249,6 +3428,21 @@ function bindFidoControls() {
       await loadFidoStatus();
     } catch (_) {
       setText("fido-status-msg", "Failed to reset security key.");
+    }
+  });
+
+  qs("fido-emulate-uv-toggle")?.addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    try {
+      setText("fido-status-msg", enabled ? "Enabling Biometric UV Emulation (UV=true)..." : "Setting Standard Roaming Mode (UV=false)...");
+      await api("/api/fido/emulate_uv", {
+        method: "POST",
+        body: JSON.stringify({ enabled })
+      });
+      setText("fido-status-msg", enabled ? "⚡ Biometric UV Emulation ENABLED (Active instantly without reboot)." : "Standard Roaming Key Mode active.");
+      await loadFidoStatus();
+    } catch (_) {
+      setText("fido-status-msg", "Failed to update UV emulation setting.");
     }
   });
 
@@ -3337,6 +3531,10 @@ function startVaultTicker() {
 }
 
 async function typeVaultEntry(id, action) {
+  if (currentFidoState.security_key_mode) {
+    setText("vault-action-status", "⚠️ USB Keyboard typing is disabled in Dedicated Passkey Mode. Use 'Copy' or switch to Normal Ducky Mode.");
+    return;
+  }
   try {
     setText("vault-action-status", "Typing via USB HID...");
     const res = await api("/api/vault/type", {
@@ -3565,6 +3763,101 @@ function bindVaultEvents() {
     } catch (_) {
       alert("Failed to save entry – network error.");
     }
+  });
+
+  // Backup Export & Import Controls
+  qs("vault-export-backup-btn")?.addEventListener("click", async () => {
+    try {
+      setText("vault-backup-status-msg", "Generating AES-256-GCM encrypted backup on hardware...");
+      const res = await api("/api/vault/backup/export");
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        setText("vault-backup-status-msg", errJson.error || "Failed to download backup.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.style.display = "none";
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.download = `esp32_hardware_vault_backup_${dateStr}.esp32vault`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        window.URL.revokeObjectURL(url);
+        a.remove();
+      }, 2000);
+      setText("vault-backup-status-msg", "✅ Backup downloaded successfully. Keep this file safe!");
+    } catch (err) {
+      setText("vault-backup-status-msg", "Download error: " + err.message);
+    }
+  });
+
+  let pendingBackupBase64 = "";
+  const fileInput = qs("vault-backup-file-input");
+  const restoreModal = qs("vault-restore-modal");
+
+  qs("vault-import-backup-btn")?.addEventListener("click", () => {
+    fileInput?.click();
+  });
+
+  fileInput?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      pendingBackupBase64 = reader.result;
+      if (restoreModal) {
+        setValue("vault-restore-pass", "");
+        setText("vault-restore-status", "");
+        restoreModal.classList.remove("hidden");
+      }
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = "";
+  });
+
+  qs("vault-restore-modal-close")?.addEventListener("click", () => {
+    restoreModal?.classList.add("hidden");
+  });
+  qs("vault-restore-cancel-btn")?.addEventListener("click", () => {
+    restoreModal?.classList.add("hidden");
+  });
+
+  qs("vault-restore-confirm-btn")?.addEventListener("click", async () => {
+    const password = qs("vault-restore-pass")?.value || "";
+    if (!pendingBackupBase64) return;
+
+    try {
+      setText("vault-restore-status", "Authenticating & decrypting backup on hardware...");
+      const res = await api("/api/vault/backup/import", {
+        method: "POST",
+        body: JSON.stringify({ backupBase64: pendingBackupBase64, password })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setText("vault-restore-status", data.error || "Failed to restore backup.");
+        return;
+      }
+      restoreModal?.classList.add("hidden");
+      setText("vault-backup-status-msg", `✅ Restored ${data.restored_totp ?? 0} 2FA/vault items & ${data.restored_passkeys ?? 0} FIDO2 passkeys!`);
+      await refreshVaultView();
+    } catch (err) {
+      setText("vault-restore-status", "Error restoring backup.");
+    }
+  });
+
+  // Passkey Inspector Controls
+  qs("fido-inspect-close")?.addEventListener("click", closeFidoInspectModal);
+  qs("fido-inspect-close-btn")?.addEventListener("click", closeFidoInspectModal);
+  qs("inspect-copy-cred-id")?.addEventListener("click", () => {
+    const val = qs("inspect-cred-id")?.value;
+    if (val) copyTextToClipboard(val, "Credential ID copied.");
+  });
+  qs("inspect-copy-pub-key")?.addEventListener("click", () => {
+    const val = qs("inspect-pub-key")?.value;
+    if (val) copyTextToClipboard(val, "Public Key coordinates copied.");
   });
 }
 

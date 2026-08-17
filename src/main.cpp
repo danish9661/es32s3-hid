@@ -23,6 +23,7 @@
 #include "mbedtls/pkcs5.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/md.h"
+#include "mbedtls/base64.h"
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
 #include <cstring>
@@ -4209,41 +4210,61 @@ void registerRoutes() {
       response->addHeader("Connection", "close");
       request->send(response);
       if (shouldReboot) {
-        indicateRebootAndRestart(500);
+        indicateRebootAndRestart(900);
       }
     },
     [](AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data, size_t len, bool final) {
       if (!hasAccess(request)) return;
 
       if (index == 0) {
+        Update.abort(); // Clear any stale state
+        
         int cmd = U_FLASH;
         String typeStr = "Firmware";
+        String lowerName = filename;
+        lowerName.toLowerCase();
+
+        bool isFsParam = false;
         if (request->hasParam("type")) {
           String type = request->getParam("type")->value();
           type.toLowerCase();
           if (type == "fs" || type == "littlefs" || type == "spiffs") {
-            cmd = U_SPIFFS;
-            typeStr = "LittleFS / Web UI";
+            isFsParam = true;
           }
         }
+
+        // Auto-detect partition type:
+        // 1. Explicit parameter
+        // 2. Filename contains littlefs or spiffs
+        // 3. Or first byte is NOT 0xE9 (ESP32 app magic byte)
+        if (isFsParam || lowerName.indexOf("littlefs") >= 0 || lowerName.indexOf("spiffs") >= 0 || (len > 0 && data[0] != 0xE9)) {
+          cmd = U_SPIFFS;
+          typeStr = "LittleFS / Web UI";
+          LittleFS.end(); // Unmount LittleFS cleanly to release all flash write locks!
+        } else {
+          cmd = U_FLASH;
+          typeStr = "Firmware";
+        }
+
         logSystem("[OTA] Starting " + typeStr + " upload: " + filename);
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) {
           Update.printError(Serial);
-          logSystem("[OTA] Update.begin failed!");
+          logSystem("[OTA] Update.begin failed: " + String(Update.errorString()));
         }
       }
 
       if (!Update.hasError()) {
         if (Update.write(data, len) != len) {
           Update.printError(Serial);
-          logSystem("[OTA] Update.write error at index " + String(index));
+          logSystem("[OTA] Update.write error at index " + String(index) + ": " + String(Update.errorString()));
         }
+        yield(); // Yield CPU so network TCP stack handles incoming packets without buffer congestion
       }
 
       if (final) {
         if (!Update.end(true)) {
           Update.printError(Serial);
-          logSystem("[OTA] Update.end failed!");
+          logSystem("[OTA] Update.end failed: " + String(Update.errorString()));
         } else {
           logSystem("[OTA] Flash verified (" + String(index + len) + " bytes)");
         }
@@ -4616,6 +4637,7 @@ void registerRoutes() {
       obj["userDisplayName"] = c.userDisplayName;
       obj["signCounter"] = c.signCounter;
       obj["createdAt"] = c.createdAt;
+      
       String idHex = "";
       for (uint8_t b : c.credId) {
         char buf[3];
@@ -4623,6 +4645,31 @@ void registerRoutes() {
         idHex += buf;
       }
       obj["credId"] = idHex;
+
+      String pubXHex = "";
+      for (uint8_t b : c.pubKeyX) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", b);
+        pubXHex += buf;
+      }
+      obj["pubKeyX"] = pubXHex;
+
+      String pubYHex = "";
+      for (uint8_t b : c.pubKeyY) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", b);
+        pubYHex += buf;
+      }
+      obj["pubKeyY"] = pubYHex;
+
+      String userHex = "";
+      for (uint8_t b : c.userId) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", b);
+        userHex += buf;
+      }
+      obj["userId"] = userHex;
+      obj["hasHmacSecret"] = !c.hmacSecretKey.empty();
     }
     doc["waiting_for_touch"] = FIDO.isWaitingForTouch();
     doc["pending_rp"] = FIDO.getPendingRpId();
@@ -4630,10 +4677,300 @@ void registerRoutes() {
     doc["pin_set"] = FidoStore::isPinSet();
     doc["pin_retries"] = FidoStore::getPinRetries();
     doc["credential_count"] = FidoStore::getAllCredentials().size();
+    doc["emulate_uv"] = FidoStore::getEmulateUv();
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
   });
+
+  server.on("/api/vault/backup/export", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    checkVaultAutoLock();
+    if (!vaultUnlocked) {
+      request->send(403, "application/json", "{\"error\":\"Please unlock vault first\"}");
+      return;
+    }
+    touchVaultActivity();
+
+    // Construct unified backup JSON
+    DynamicJsonDocument backupDoc(32768);
+    backupDoc["format"] = "ESP32_VAULT_BACKUP";
+    backupDoc["version"] = "2.5.0";
+    backupDoc["exported_at"] = (uint32_t)(time(nullptr));
+
+    // 1. Software Vault Entries
+    DynamicJsonDocument vaultItemsDoc(16384);
+    if (deserializeJson(vaultItemsDoc, vaultCachedJson) == DeserializationError::Ok) {
+      backupDoc["software_vault"] = vaultItemsDoc.as<JsonArray>();
+    } else {
+      backupDoc.createNestedArray("software_vault");
+    }
+
+    // 2. FIDO2 Resident Passkeys
+    JsonArray fidoArr = backupDoc.createNestedArray("fido_credentials");
+    for (const auto &c : FidoStore::getAllCredentials()) {
+      JsonObject obj = fidoArr.createNestedObject();
+      obj["rpId"] = c.rpId;
+      obj["userName"] = c.userName;
+      obj["userDisplayName"] = c.userDisplayName;
+      obj["signCounter"] = c.signCounter;
+      obj["createdAt"] = c.createdAt;
+
+      auto toHexStr = [](const std::vector<uint8_t> &vec) {
+        String h = "";
+        for (uint8_t b : vec) {
+          char buf[3];
+          snprintf(buf, sizeof(buf), "%02x", b);
+          h += buf;
+        }
+        return h;
+      };
+
+      obj["userId"] = toHexStr(c.userId);
+      obj["credId"] = toHexStr(c.credId);
+      obj["privKey"] = toHexStr(c.privKey);
+      obj["pubKeyX"] = toHexStr(c.pubKeyX);
+      obj["pubKeyY"] = toHexStr(c.pubKeyY);
+      obj["hmacSecretKey"] = toHexStr(c.hmacSecretKey);
+    }
+
+    // 3. FIDO Settings
+    JsonObject fidoSettings = backupDoc.createNestedObject("fido_settings");
+    fidoSettings["pin_set"] = FidoStore::isPinSet();
+    fidoSettings["emulate_uv"] = FidoStore::getEmulateUv();
+
+    String jsonStr;
+    serializeJson(backupDoc, jsonStr);
+
+    size_t plainLen = jsonStr.length();
+    uint8_t iv[VAULT_IV_LEN];
+    uint8_t tag[VAULT_TAG_LEN];
+    esp_fill_random(iv, sizeof(iv));
+
+    uint8_t *cipherBuf = static_cast<uint8_t *>(malloc(plainLen + 1));
+    if (!cipherBuf) {
+      request->send(500, "application/json", "{\"error\":\"Memory allocation failed\"}");
+      return;
+    }
+
+    bool ok = aes256GcmEncrypt(
+      vaultKey,
+      iv,
+      sizeof(iv),
+      reinterpret_cast<const uint8_t *>(jsonStr.c_str()),
+      plainLen,
+      cipherBuf,
+      tag,
+      sizeof(tag)
+    );
+
+    if (!ok) {
+      free(cipherBuf);
+      request->send(500, "application/json", "{\"error\":\"Encryption failed\"}");
+      return;
+    }
+
+    VaultHeader hdr;
+    memcpy(hdr.magic, "EVLT", 4);
+    memcpy(hdr.salt, vaultSalt, VAULT_SALT_LEN);
+    memcpy(hdr.iv, iv, VAULT_IV_LEN);
+    memcpy(hdr.tag, tag, VAULT_TAG_LEN);
+    hdr.ciphertextLen = static_cast<uint32_t>(plainLen);
+
+    size_t totalBackupSize = sizeof(VaultHeader) + plainLen;
+    uint8_t *outBlob = static_cast<uint8_t *>(malloc(totalBackupSize));
+    if (!outBlob) {
+      free(cipherBuf);
+      request->send(500, "application/json", "{\"error\":\"Buffer allocation failed\"}");
+      return;
+    }
+
+    memcpy(outBlob, &hdr, sizeof(VaultHeader));
+    memcpy(outBlob + sizeof(VaultHeader), cipherBuf, plainLen);
+    free(cipherBuf);
+
+    AsyncWebServerResponse *response = request->beginResponse(
+      "application/octet-stream",
+      totalBackupSize,
+      [outBlob, totalBackupSize](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+        size_t available = totalBackupSize - index;
+        size_t toSend = (available > maxLen) ? maxLen : available;
+        memcpy(buffer, outBlob + index, toSend);
+        if (index + toSend >= totalBackupSize) {
+          free(outBlob);
+        }
+        return toSend;
+      }
+    );
+    response->addHeader("Content-Disposition", "attachment; filename=\"esp32_hardware_vault_backup.esp32vault\"");
+    request->send(response);
+  });
+
+  server.on("/api/vault/backup/import", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(65536);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Invalid payload\"}");
+        return;
+      }
+
+      String backupBase64 = doc["backupBase64"] | "";
+      String password = doc["password"] | "";
+
+      if (backupBase64.isEmpty()) {
+        request->send(400, "application/json", "{\"error\":\"Missing backup file data\"}");
+        return;
+      }
+
+      // Base64 decode backup
+      std::vector<uint8_t> rawBackup;
+      // Strip data URL prefix if present (e.g. data:application/octet-stream;base64,)
+      int commaIdx = backupBase64.indexOf(',');
+      if (commaIdx >= 0) {
+        backupBase64 = backupBase64.substring(commaIdx + 1);
+      }
+
+      // Decode base64
+      int bLen = backupBase64.length();
+      std::vector<uint8_t> decoded(bLen);
+      size_t decodedLen = 0;
+      mbedtls_base64_decode(decoded.data(), decoded.size(), &decodedLen, (const unsigned char*)backupBase64.c_str(), bLen);
+      if (decodedLen < sizeof(VaultHeader)) {
+        request->send(400, "application/json", "{\"error\":\"Invalid or corrupted backup format\"}");
+        return;
+      }
+
+      VaultHeader hdr;
+      memcpy(&hdr, decoded.data(), sizeof(VaultHeader));
+
+      if (memcmp(hdr.magic, "EVLT", 4) != 0) {
+        request->send(400, "application/json", "{\"error\":\"Unrecognized backup header magic\"}");
+        return;
+      }
+
+      size_t cipherLen = hdr.ciphertextLen;
+      if (sizeof(VaultHeader) + cipherLen > decodedLen) {
+        request->send(400, "application/json", "{\"error\":\"Truncated backup payload\"}");
+        return;
+      }
+
+      uint8_t key[VAULT_KEY_LEN];
+      if (!password.isEmpty()) {
+        if (!pbkdf2DeriveKey(password, hdr.salt, VAULT_SALT_LEN, key)) {
+          request->send(500, "application/json", "{\"error\":\"Key derivation failed\"}");
+          return;
+        }
+      } else if (vaultUnlocked) {
+        memcpy(key, vaultKey, VAULT_KEY_LEN);
+      } else {
+        request->send(403, "application/json", "{\"error\":\"Master Password required to restore backup\"}");
+        return;
+      }
+
+      const uint8_t *ciphertext = decoded.data() + sizeof(VaultHeader);
+      std::vector<uint8_t> plaintext(cipherLen + 1, 0);
+
+      bool ok = aes256GcmDecrypt(
+        key,
+        hdr.iv,
+        VAULT_IV_LEN,
+        hdr.tag,
+        VAULT_TAG_LEN,
+        ciphertext,
+        cipherLen,
+        plaintext.data()
+      );
+
+      if (!ok) {
+        request->send(403, "application/json", "{\"error\":\"Decryption failed: Incorrect password or corrupted backup\"}");
+        return;
+      }
+
+      String jsonStr = reinterpret_cast<const char *>(plaintext.data());
+      DynamicJsonDocument restoredDoc(32768);
+      if (deserializeJson(restoredDoc, jsonStr) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Corrupted backup JSON payload\"}");
+        return;
+      }
+
+      uint32_t restoredTotpCount = 0;
+      uint32_t restoredPasskeyCount = 0;
+
+      // 1. Restore Software Vault Entries
+      if (restoredDoc.containsKey("software_vault") && restoredDoc["software_vault"].is<JsonArray>()) {
+        String vaultItemsStr;
+        serializeJson(restoredDoc["software_vault"], vaultItemsStr);
+        memcpy(vaultSalt, hdr.salt, VAULT_SALT_LEN);
+        memcpy(vaultKey, key, VAULT_KEY_LEN);
+        saveVaultEncrypted(vaultItemsStr, vaultKey);
+        vaultCachedJson = vaultItemsStr;
+        vaultUnlocked = true;
+        vaultLastActiveMs = millis();
+        restoredTotpCount = restoredDoc["software_vault"].as<JsonArray>().size();
+      }
+
+      // 2. Restore FIDO2 Passkeys
+      if (restoredDoc.containsKey("fido_credentials") && restoredDoc["fido_credentials"].is<JsonArray>()) {
+        std::vector<FidoCredential> imported;
+        for (JsonObject obj : restoredDoc["fido_credentials"].as<JsonArray>()) {
+          FidoCredential c;
+          c.rpId = obj["rpId"].as<String>();
+          c.userName = obj["userName"] | "";
+          c.userDisplayName = obj["userDisplayName"] | "";
+          c.signCounter = obj["signCounter"] | 0;
+          c.createdAt = obj["createdAt"] | 0;
+
+          auto fromHexStr = [](const String &h) {
+            std::vector<uint8_t> v;
+            for (size_t i = 0; i + 1 < h.length(); i += 2) {
+              char sub[3] = { h[i], h[i+1], '\0' };
+              v.push_back((uint8_t)strtol(sub, nullptr, 16));
+            }
+            return v;
+          };
+
+          c.userId = fromHexStr(obj["userId"] | "");
+          c.credId = fromHexStr(obj["credId"] | "");
+          c.privKey = fromHexStr(obj["privKey"] | "");
+          c.pubKeyX = fromHexStr(obj["pubKeyX"] | "");
+          c.pubKeyY = fromHexStr(obj["pubKeyY"] | "");
+          c.hmacSecretKey = fromHexStr(obj["hmacSecretKey"] | "");
+          if (c.hmacSecretKey.empty()) {
+            c.hmacSecretKey.resize(32);
+            esp_fill_random(c.hmacSecretKey.data(), 32);
+          }
+
+          if (!c.credId.empty() && !c.privKey.empty()) {
+            imported.push_back(c);
+          }
+        }
+        FidoStore::importCredentials(imported, true);
+        restoredPasskeyCount = imported.size();
+      }
+
+      // 3. Restore FIDO Settings
+      if (restoredDoc.containsKey("fido_settings")) {
+        bool emUv = restoredDoc["fido_settings"]["emulate_uv"] | false;
+        FidoStore::setEmulateUv(emUv);
+      }
+
+      logSystem(String("[VAULT] Backup restored successfully: ") + String(restoredTotpCount) + " 2FA/vault items, " + String(restoredPasskeyCount) + " FIDO2 passkeys");
+      request->send(200, "application/json", "{\"ok\":true,\"restored_totp\":" + String(restoredTotpCount) + ",\"restored_passkeys\":" + String(restoredPasskeyCount) + "}");
+    }
+  );
+
+  server.on("/api/fido/emulate_uv", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(256);
+      deserializeJson(doc, data, len);
+      bool enabled = doc["enabled"] | false;
+      FidoStore::setEmulateUv(enabled);
+      logSystem(String("[FIDO2] Biometric UV Emulation ") + (enabled ? "ENABLED" : "DISABLED"));
+      request->send(200, "application/json", enabled ? "{\"ok\":true,\"emulate_uv\":true}" : "{\"ok\":true,\"emulate_uv\":false}");
+    }
+  );
 
   server.on("/api/fido/mode", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -4667,6 +5004,60 @@ void registerRoutes() {
     logSystem("[FIDO2] Hardware Security Key Factory Reset: All passkeys and PIN cleared");
     request->send(200, "application/json", "{\"ok\":true,\"reset\":true}");
   });
+
+  server.on("/api/fido/pin", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      String action = doc["action"] | "";
+      String currentPin = doc["currentPin"] | "";
+      String newPin = doc["newPin"] | "";
+
+      if (action == "remove" || action == "clear") {
+        FidoStore::clearPin();
+        logSystem("[FIDO2] Security Key PIN removed");
+        request->send(200, "application/json", "{\"ok\":true,\"removed\":true}");
+        return;
+      }
+
+      if (action == "set") {
+        if (newPin.length() < 4) {
+          request->send(400, "application/json", "{\"error\":\"PIN must be at least 4 digits\"}");
+          return;
+        }
+        if (FidoStore::isPinSet()) {
+          // If PIN is already set, require valid current PIN to change
+          if (currentPin.length() < 4) {
+            request->send(400, "application/json", "{\"error\":\"Current PIN is required\"}");
+            return;
+          }
+          bool ok = FidoStore::changePin(
+            reinterpret_cast<const uint8_t*>(currentPin.c_str()), currentPin.length(),
+            reinterpret_cast<const uint8_t*>(newPin.c_str()), newPin.length()
+          );
+          if (!ok) {
+            request->send(403, "application/json", "{\"error\":\"Incorrect current PIN or max attempts exceeded\"}");
+            return;
+          }
+          logSystem("[FIDO2] Security Key PIN changed successfully");
+          request->send(200, "application/json", "{\"ok\":true,\"changed\":true}");
+        } else {
+          // Setting new PIN for the first time
+          bool ok = FidoStore::setPin(reinterpret_cast<const uint8_t*>(newPin.c_str()), newPin.length());
+          if (!ok) {
+            request->send(400, "application/json", "{\"error\":\"Failed to set PIN\"}");
+            return;
+          }
+          logSystem("[FIDO2] Security Key PIN configured successfully");
+          request->send(200, "application/json", "{\"ok\":true,\"pin_set\":true}");
+        }
+        return;
+      }
+
+      request->send(400, "application/json", "{\"error\":\"Invalid action\"}");
+    }
+  );
 
   server.on("/api/fido/pin/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;

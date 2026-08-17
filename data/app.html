@@ -170,32 +170,171 @@
               <p>No items in your vault yet. Click <strong>+ Add Item</strong> to add your first 2FA authenticator or password.</p>
             </div>
             <div id="vault-action-status" class="status-line"></div>
+
+            <!-- FIDO2 Hardware Passkeys Section (Accessible after unlocking vault) -->
+            <div class="network-info-card" style="margin-top:24px;">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span>🛡️ Hardware Passkeys (FIDO2 / WebAuthn CTAP2)</span>
+                    <span id="fido-mode-badge" class="badge ok">Normal Ducky Mode</span>
+                    <span id="fido-pin-badge" class="badge">PIN: Not Set</span>
+                    <span id="fido-touch-badge" class="badge hidden" style="background:#00f3ff; color:#070b14; font-weight:700;">⚠️ Touch BOOT Button</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Dedicated physical security key for Chrome, Google, GitHub, Apple, Microsoft & Android. 💡 <em>Hold physical BOOT button 2.5s on board to toggle mode anytime.</em></p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <button type="button" id="fido-toggle-mode-btn" class="btn-primary btn-sm">🛡️ Switch to Passkey Mode</button>
+                  <button type="button" id="fido-test-register-btn" class="btn-outline btn-sm">🔑 Test Passkey</button>
+                  <button type="button" id="fido-manage-pin-btn" class="btn-outline btn-sm" style="color:#00f3ff; border-color:rgba(0,243,255,0.3);">🔑 Manage PIN</button>
+                  <button type="button" id="fido-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
+                  <button type="button" id="fido-reset-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Reset Security Key</button>
+                </div>
+              </div>
+
+              <!-- Biometric UV Emulation Option Row -->
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; padding:10px 14px; background:rgba(0,243,255,0.04); border:1px solid rgba(0,243,255,0.15); border-radius:8px;">
+                <div>
+                  <div style="font-weight:600; font-size:0.9rem; display:flex; align-items:center; gap:6px;">
+                    <span>⚡ Emulate Biometric Verification (UV = true)</span>
+                    <span id="fido-uv-badge" class="badge">Standard UV=false</span>
+                  </div>
+                  <div class="small" style="color:var(--muted); font-size:11px; margin-top:2px;">When enabled, BOOT button touch fulfills biometric User Verification (UV) without requiring a PIN. Changes instantly with zero reboot!</div>
+                </div>
+                <label class="switch" style="flex-shrink:0;">
+                  <input type="checkbox" id="fido-emulate-uv-toggle">
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div id="fido-passkeys-list" class="files-list" style="margin-top:12px; max-height:220px; overflow-y:auto;">
+                <!-- Registered Passkeys -->
+              </div>
+              <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
+            </div>
+
+            <!-- Encrypted Backup & Migration Card -->
+            <div class="network-info-card" style="margin-top:20px; background:rgba(16,185,129,0.03); border-color:rgba(16,185,129,0.2);">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px;">
+                    <span>💾 Encrypted Vault & Passkey Backup</span>
+                    <span class="badge ok">AES-256-GCM Zero-Knowledge</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Download an encrypted bundle of all 2FA TOTP tokens, passwords, and FIDO2 resident passkeys. Restore anytime on this or any other ESP32-S3.</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <button type="button" id="vault-export-backup-btn" class="btn-primary btn-sm" style="background:#10b981; border-color:#10b981; color:#070b14;">⬇️ Download Backup (.esp32vault)</button>
+                  <button type="button" id="vault-import-backup-btn" class="btn-outline btn-sm">⬆️ Upload & Restore</button>
+                  <input type="file" id="vault-backup-file-input" accept=".esp32vault,.bin,.enc" class="hidden">
+                </div>
+              </div>
+              <div id="vault-backup-status-msg" class="status-line" style="margin-top:8px;"></div>
+            </div>
           </div>
 
-          <!-- FIDO2 Hardware Passkeys Section (Always accessible) -->
-          <div class="network-info-card" style="margin-top:24px;">
-            <div class="network-head">
-              <div>
-                <h4 style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                  <span>🛡️ Hardware Passkeys (FIDO2 / WebAuthn CTAP2)</span>
-                  <span id="fido-mode-badge" class="badge ok">Normal Ducky Mode</span>
-                  <span id="fido-pin-badge" class="badge">PIN: Not Set</span>
-                  <span id="fido-touch-badge" class="badge hidden" style="background:#00f3ff; color:#070b14; font-weight:700;">⚠️ Touch BOOT Button</span>
-                </h4>
-                <p class="small" style="margin:2px 0 0;">Dedicated physical security key for Chrome, Google, GitHub, Apple, Microsoft & Android. 💡 <em>Hold physical BOOT button 2.5s on board to toggle mode anytime.</em></p>
+          <!-- Passkey Inspector Modal -->
+          <div id="fido-inspect-modal" class="modal-overlay hidden">
+            <div class="modal-card" style="max-width:540px;">
+              <div class="modal-head">
+                <h3 id="fido-inspect-title">🔑 Passkey Details</h3>
+                <button id="fido-inspect-close" class="btn-outline btn-sm">✕</button>
               </div>
-              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                <button type="button" id="fido-toggle-mode-btn" class="btn-primary btn-sm">🛡️ Switch to Passkey Mode</button>
-                <button type="button" id="fido-test-register-btn" class="btn-outline btn-sm">🔑 Test Passkey</button>
-                <button type="button" id="fido-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
-                <button type="button" id="fido-clear-pin-btn" class="btn-outline btn-sm hidden" style="color:#f59e0b; border-color:rgba(245,158,11,0.3);">🔓 Clear PIN</button>
-                <button type="button" id="fido-reset-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Reset Security Key</button>
+              <div class="modal-body" style="font-size:0.88rem;">
+                <div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; display:grid; gap:8px;">
+                  <div><span style="color:var(--muted);">Relying Party (Domain):</span> <strong id="inspect-rp-id" style="color:#00f3ff;"></strong></div>
+                  <div><span style="color:var(--muted);">Username:</span> <strong id="inspect-user-name" style="color:#5fe3a1;"></strong></div>
+                  <div><span style="color:var(--muted);">Display Name:</span> <span id="inspect-display-name"></span></div>
+                  <div><span style="color:var(--muted);">Signature Counter:</span> <strong id="inspect-sign-counter"></strong></div>
+                  <div><span style="color:var(--muted);">Created:</span> <span id="inspect-created-at"></span></div>
+                </div>
+
+                <div style="margin-top:12px;">
+                  <label class="label">Credential ID (32 bytes Hex)</label>
+                  <div class="token-row">
+                    <input class="input" id="inspect-cred-id" readonly style="font-family:monospace; font-size:0.8rem;">
+                    <button class="btn-outline btn-sm" id="inspect-copy-cred-id">Copy</button>
+                  </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                  <label class="label">Public Key (NIST P-256 Coordinates)</label>
+                  <div class="token-row">
+                    <input class="input" id="inspect-pub-key" readonly style="font-family:monospace; font-size:0.8rem;">
+                    <button class="btn-outline btn-sm" id="inspect-copy-pub-key">Copy</button>
+                  </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                  <label class="label">PRF / HMAC Secret Vault Encryption</label>
+                  <div id="inspect-hmac-badge" class="badge ok">Supported (WebAuthn PRF Enabled)</div>
+                </div>
+
+                <div style="margin-top:16px; text-align:right;">
+                  <button type="button" id="fido-inspect-close-btn" class="btn-primary btn-sm">Close</button>
+                </div>
               </div>
             </div>
-            <div id="fido-passkeys-list" class="files-list" style="margin-top:12px; max-height:220px; overflow-y:auto;">
-              <!-- Registered Passkeys -->
+          </div>
+
+          <!-- Restore Backup Modal -->
+          <div id="vault-restore-modal" class="modal-overlay hidden">
+            <div class="modal-card" style="max-width:440px;">
+              <div class="modal-head">
+                <h3>⬆️ Restore Encrypted Backup</h3>
+                <button id="vault-restore-modal-close" class="btn-outline btn-sm">✕</button>
+              </div>
+              <div class="modal-body">
+                <p class="small">Enter the Master Password used when this backup file was created:</p>
+                <div style="margin-top:12px;">
+                  <label class="label" for="vault-restore-pass">Master Password</label>
+                  <input class="input" id="vault-restore-pass" type="password" placeholder="Enter backup password">
+                </div>
+                <div id="vault-restore-status" class="status-line" style="margin-top:10px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                  <button type="button" id="vault-restore-cancel-btn" class="btn-outline btn-sm">Cancel</button>
+                  <button type="button" id="vault-restore-confirm-btn" class="btn-primary btn-sm">Restore Everything</button>
+                </div>
+              </div>
             </div>
-            <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
+          </div>
+
+          <!-- FIDO2 PIN Management Modal -->
+          <div id="fido-pin-modal" class="modal-overlay hidden">
+            <div class="modal-card" style="max-width:440px;">
+              <div class="modal-head">
+                <h3 id="fido-pin-modal-title">🔑 Manage Security Key PIN</h3>
+                <button id="fido-pin-modal-close" class="btn-outline btn-sm">✕</button>
+              </div>
+              <div class="modal-body">
+                <p class="small" id="fido-pin-modal-desc">Configure or update the hardware PIN protecting your passkeys.</p>
+                
+                <div id="fido-current-pin-group" style="margin-top:12px;">
+                  <label class="label" for="fido-input-current-pin">Current PIN</label>
+                  <input class="input" id="fido-input-current-pin" type="password" placeholder="Enter current PIN" autocomplete="off">
+                </div>
+
+                <div style="margin-top:12px;">
+                  <label class="label" for="fido-input-new-pin">New PIN (min 4 digits)</label>
+                  <input class="input" id="fido-input-new-pin" type="password" placeholder="Enter new PIN" autocomplete="off">
+                </div>
+
+                <div style="margin-top:12px;">
+                  <label class="label" for="fido-input-confirm-pin">Confirm New PIN</label>
+                  <input class="input" id="fido-input-confirm-pin" type="password" placeholder="Confirm new PIN" autocomplete="off">
+                </div>
+
+                <div id="fido-pin-status-msg" class="status-line" style="margin-top:10px;"></div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:18px;">
+                  <button type="button" id="fido-remove-pin-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🔓 Remove PIN</button>
+                  <div style="display:flex; gap:8px;">
+                    <button type="button" id="fido-pin-cancel-btn" class="btn-outline btn-sm">Cancel</button>
+                    <button type="button" id="fido-save-pin-btn" class="btn-primary btn-sm">💾 Save PIN</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Add / Edit Modal -->

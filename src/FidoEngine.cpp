@@ -202,12 +202,12 @@ void FidoEngine::handleGetInfo() {
   w.writeInt(0x03);
   w.writeBytes(aaguid, 16);
 
-  // 04: options -> { "rk": true, "up": true, "uv": false, "plat": false, "credMgmt": true, "clientPin": isPinSet(), "largeBlobs": true }
+  // 04: options -> { "rk": true, "up": true, "uv": getEmulateUv(), "plat": false, "credMgmt": true, "clientPin": isPinSet(), "largeBlobs": true }
   w.writeInt(0x04);
   w.writeMap(7);
   w.writeText("rk"); w.writeBool(true);
   w.writeText("up"); w.writeBool(true);
-  w.writeText("uv"); w.writeBool(false);
+  w.writeText("uv"); w.writeBool(FidoStore::getEmulateUv());
   w.writeText("plat"); w.writeBool(false);
   w.writeText("credMgmt"); w.writeBool(true);
   w.writeText("clientPin"); w.writeBool(FidoStore::isPinSet());
@@ -251,7 +251,7 @@ void FidoEngine::executeMakeCredential() {
   uint8_t rpHash[32];
   FidoStore::sha256(reinterpret_cast<const uint8_t *>(cred.rpId.c_str()), cred.rpId.length(), rpHash);
 
-  uint8_t flags = FLAG_USER_PRESENT | FLAG_USER_VERIFIED | FLAG_ATTESTED_CRED_DATA;
+  uint8_t flags = FLAG_USER_PRESENT | (FidoStore::getEmulateUv() ? FLAG_USER_VERIFIED : 0) | FLAG_ATTESTED_CRED_DATA;
 
   uint32_t count = FidoStore::getNextGlobalCounter();
   uint8_t countBytes[4] = {
@@ -328,7 +328,7 @@ void FidoEngine::executeGetAssertion() {
   uint8_t rpHash[32];
   String targetRp = pendingReq.rpId.isEmpty() ? cred->rpId : pendingReq.rpId;
   FidoStore::sha256(reinterpret_cast<const uint8_t *>(targetRp.c_str()), targetRp.length(), rpHash);
-  uint8_t flags = pendingReq.upRequired ? (FLAG_USER_PRESENT | FLAG_USER_VERIFIED) : 0x00;
+  uint8_t flags = pendingReq.upRequired ? (FLAG_USER_PRESENT | (FidoStore::getEmulateUv() ? FLAG_USER_VERIFIED : 0)) : 0x00;
 
   uint32_t count = FidoStore::getNextGlobalCounter();
   cred->signCounter = count;

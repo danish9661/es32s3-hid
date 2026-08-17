@@ -6,6 +6,7 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 
 ## Table of Contents
 - [Highlights & Features](#highlights--features)
+- [FIDO2 Hardware Passkeys & Encrypted Vault](#fido2-hardware-passkeys--encrypted-vault)
 - [System Architecture](#system-architecture)
 - [Quick Start Guide](#quick-start-guide)
 - [Network Access & IP Discovery](#network-access--ip-discovery)
@@ -22,6 +23,14 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 
 ## Highlights & Features
 
+- **FIDO2 / WebAuthn Hardware Security Key**:
+  - Full W3C WebAuthn & CTAP 2.0 / 2.1 compliance (NIST P-256 ECC, SHA-256, HMAC-secret PRF).
+  - Compatible with Google, GitHub, Apple, Microsoft, Bitwarden, 1Password, Windows Hello, and Android Google Play Services.
+  - Dedicated Passkey Mode with 2.5s physical `BOOT` button gesture toggling.
+- **Zero-Knowledge Encrypted Vault & 2FA Authenticator**:
+  - Encrypted with **AES-256-GCM** and **PBKDF2-HMAC-SHA256** (100,000 iterations).
+  - Live 2FA TOTP code generator with auto-typing and auto-fill.
+  - **Zero-Knowledge Encrypted Backup & Restore (`.esp32vault`)**: 1-click export and import of all 2FA accounts and FIDO2 passkeys with dual NVS flash persistence.
 - **Dual-Core FreeRTOS Architecture**: Core 1 handles heavy script parsing and 2 MB PSRAM payload streaming, while Core 0 runs real-time USB HID events and UDP network ingestion.
 - **Home WiFi & Auto IP Discovery**:
   - Automatically displays assigned Home WiFi IP (Station), Direct AP IP, Gateway, and live RSSI signal strength.
@@ -41,6 +50,36 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
   - Custom Vendor ID, Product ID, Manufacturer Name, and Product Name (with presets for Espressif, Logitech, Microsoft, Arduino, Adafruit).
 - **Single-Operator Session & Brute-Force Rate Limiting**:
   - Cookie-based authentication preventing multiple concurrent operators and IP-based exponential backoff rate limiting.
+
+---
+
+## FIDO2 Hardware Passkeys & Encrypted Vault
+
+The ESP32-S3 functions as a **standalone FIDO2 / WebAuthn physical security key** (similar to a YubiKey 5 Series) combined with a **Zero-Knowledge Encrypted Software Vault**:
+
+```mermaid
+graph TD
+    subgraph ESP32-S3 Hardware Authenticator
+        A[Host WebAuthn Login / Prompt] --> B{Physical BOOT Button}
+        B -->|Tap to Authorize| C[NIST P-256 Signature Engine]
+        C --> D[Dual-Flash Persistence: LittleFS + NVS]
+        D --> E[Zero-Knowledge Encrypted Backup .esp32vault]
+    end
+```
+
+### Key Capabilities:
+1. **Physical Presence (`BOOT` Button Gesture)**:
+   - When a website requests a passkey login or registration, the ESP32 waits for physical touch on the **`BOOT` button**.
+   - **Mode Toggle Gesture**: Hold the physical `BOOT` button for **2.5 seconds** anytime to switch between **💻 Normal Ducky Mode** (Green LED) and **🛡️ Dedicated Passkey Mode** (Neon Cyan LED).
+2. **Biometric UV Emulation Toggle (`uv: true`)**:
+   - Easily toggle between **Standard Roaming Key (`uv: false`)** and **Emulated Biometric Verification (`uv: true`)** from the Web Vault dashboard. Changes dynamically in 0ms without rebooting!
+3. **Hardware PIN Management**:
+   - Configure a 4–8 digit hardware PIN with automatic lockout counters (8 retries) to protect against unauthorized physical use.
+4. **Encrypted Backup & Restore (`.esp32vault`)**:
+   - Export an **AES-256-GCM** encrypted binary backup containing all 2FA TOTP secret keys, passwords, and FIDO2 resident passkeys.
+   - Restore on any ESP32-S3 with zero risk of credential loss.
+
+> 📖 **Full User Guide**: See [docs/FIDO2_PASSKEY_USER_GUIDE.md](docs/FIDO2_PASSKEY_USER_GUIDE.md) for step-by-step registration guides, Android setup, PIN management, and backup instructions.
 
 ---
 

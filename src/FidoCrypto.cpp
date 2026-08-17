@@ -13,6 +13,7 @@ static uint8_t pinStoredHash[32] = {0};
 static uint8_t pinRetriesLeft = 8;
 static uint8_t currentPinToken[32] = {0};
 static bool pinTokenValid = false;
+static bool emulateBiometricUv = false;
 
 // W3C WebAuthn Spec: For authenticators using self-attestation or none attestation,
 // the AAGUID field MUST be set to 16 zero bytes (0x00).
@@ -161,6 +162,7 @@ bool FidoStore::loadFromStorage() {
     globalCounter = prefs.getUInt("counter", 1);
     pinIsSet = prefs.getBool("pin_set", false);
     pinRetriesLeft = prefs.getUChar("pin_retries", 8);
+    emulateBiometricUv = prefs.getBool("emulate_uv", false);
     if (pinIsSet) {
       prefs.getBytes("pin_hash", pinStoredHash, 32);
     }
@@ -607,4 +609,40 @@ uint32_t FidoStore::getNextGlobalCounter() {
     prefs.end();
   }
   return globalCounter;
+}
+
+bool FidoStore::getEmulateUv() {
+  return emulateBiometricUv;
+}
+
+void FidoStore::setEmulateUv(bool enable) {
+  emulateBiometricUv = enable;
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putBool("emulate_uv", enable);
+    prefs.end();
+  }
+}
+
+void FidoStore::importCredentials(const std::vector<FidoCredential> &list, bool replace) {
+  if (replace) {
+    credentials.clear();
+  }
+  for (const auto &c : list) {
+    if (!c.credId.empty() && !c.privKey.empty()) {
+      // Check if already exists by credId
+      bool exists = false;
+      for (auto &existing : credentials) {
+        if (existing.credId == c.credId) {
+          existing = c;
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        credentials.push_back(c);
+      }
+    }
+  }
+  saveToStorage();
 }
