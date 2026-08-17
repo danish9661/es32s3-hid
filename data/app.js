@@ -2014,25 +2014,22 @@ function shellQuote(value) {
 
 function buildHostCommand(deviceIp, port, options = {}) {
   const host = deviceIp || "192.168.4.1";
-  const noPreview = options.noPreview !== false;
-  const blockLocalInput = Boolean(options.blockLocalInput);
+  const exclusive = Boolean(options.blockLocalInput);
+  const preview = Boolean(options.preview);
 
   const base = [
     "python",
-    "server/server.py",
-    "--host", shellQuote(host),
+    "esp32_kvm.py",
+    "--ip", shellQuote(host),
     "--port", String(port || 4210),
-    "--toggle-key", "f8",
+    "--toggle", "f8",
   ];
 
-  if (noPreview) {
-    base.push("--no-preview");
-  } else {
-    base.push("--preview-port", "9876");
+  if (exclusive) {
+    base.push("--exclusive");
   }
-
-  if (blockLocalInput) {
-    base.push("--block-local-input");
+  if (preview) {
+    base.push("--preview");
   }
 
   return base.join(" ");
@@ -2043,25 +2040,25 @@ function updateKvmHelperPanel(statusData = {}) {
   const port = Number(statusData.port || qs("kvm-port")?.value || 4210);
 
   const cmdMain = buildHostCommand(ip, port, {
-    noPreview: true,
+    preview: false,
     blockLocalInput: false,
   });
-  const cmdNoPreview = buildHostCommand(ip, port, {
-    noPreview: true,
+  const cmdExclusive = buildHostCommand(ip, port, {
+    preview: false,
     blockLocalInput: true,
   });
-  const targetCaptureCommand = "python server/target_screenshot_server.py --port 9988";
+  const targetCaptureCommand = "python esp32_kvm.py --preview --preview-port 8080";
 
   const mainEl = qs("kvm-cmd-main");
   const lowEl = qs("kvm-cmd-no-preview");
   const targetCaptureEl = qs("target-capture-cmd");
   if (mainEl) mainEl.value = cmdMain;
-  if (lowEl) lowEl.value = cmdNoPreview;
+  if (lowEl) lowEl.value = cmdExclusive;
   if (targetCaptureEl) targetCaptureEl.value = targetCaptureCommand;
 
   const screenshotUrlInput = qs("screenshot-url");
-  if (screenshotUrlInput && !screenshotUrlInput.value.trim()) {
-    screenshotUrlInput.value = "http://192.168.1.55:9988/screenshot.bmp";
+  if (screenshotUrlInput && (!screenshotUrlInput.value.trim() || screenshotUrlInput.value.includes("9988"))) {
+    screenshotUrlInput.value = "http://192.168.1.55:8080/screenshot.jpg";
   }
 }
 
@@ -2494,14 +2491,25 @@ async function runSelectedActionFile() {
     return;
   }
 
+  setText("record-status", `Queuing: ${name}...`);
   try {
     const res = await api(`/api/action_file/run?name=${encodeURIComponent(name)}`, { method: "POST" });
     if (!res.ok) {
-      setText("record-status", "Failed to queue action file.");
+      let errDetail = "";
+      try {
+        const errJson = await res.json();
+        errDetail = errJson.error ? ` (${errJson.error})` : "";
+      } catch (_) {}
+      const msg = {
+        400: `Bad file name: "${name}"`,
+        404: `File not found on ESP: "${name}" — re-upload it`,
+        503: "ESP is busy running another script — wait and retry",
+      }[res.status] || `HTTP ${res.status}${errDetail}`;
+      setText("record-status", `❌ ${msg}`);
       return;
     }
 
-    setText("record-status", `Queued action file: ${name}`);
+    setText("record-status", `✅ Queued: ${name} — running on ESP32...`);
     refreshStatus();
   } catch (_) {
     setText("record-status", "Network error while queueing action file.");
