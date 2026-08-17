@@ -243,6 +243,133 @@ constexpr size_t MSC_SECTOR_SIZE = 512;
 constexpr size_t MSC_SECTOR_COUNT = 4096; // 2 MB
 constexpr size_t MSC_DISK_SIZE = MSC_SECTOR_COUNT * MSC_SECTOR_SIZE;
 
+#define HID_REPORT_ID_ABSMOUSE 7
+
+#define TUD_HID_REPORT_DESC_ABSMOUSE(...) \
+  HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP      )                   ,\
+  HID_USAGE      ( HID_USAGE_DESKTOP_MOUSE     )                   ,\
+  HID_COLLECTION ( HID_COLLECTION_APPLICATION  )                   ,\
+    /* Report ID if any */\
+    __VA_ARGS__ \
+    HID_USAGE      ( HID_USAGE_DESKTOP_POINTER )                   ,\
+    HID_COLLECTION ( HID_COLLECTION_PHYSICAL   )                   ,\
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_BUTTON  )                   ,\
+        HID_USAGE_MIN   ( 1                                      ) ,\
+        HID_USAGE_MAX   ( 5                                      ) ,\
+        HID_LOGICAL_MIN ( 0                                      ) ,\
+        HID_LOGICAL_MAX ( 1                                      ) ,\
+        /* Left, Right, Middle, Backward, Forward buttons */ \
+        HID_REPORT_COUNT( 5                                      ) ,\
+        HID_REPORT_SIZE ( 1                                      ) ,\
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ) ,\
+        /* 3 bit padding */ \
+        HID_REPORT_COUNT( 1                                      ) ,\
+        HID_REPORT_SIZE ( 3                                      ) ,\
+        HID_INPUT       ( HID_CONSTANT                           ) ,\
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_DESKTOP )                   ,\
+        /* X, Y absolute position [0, 32767] */ \
+        HID_USAGE       ( HID_USAGE_DESKTOP_X                    ) ,\
+        HID_USAGE       ( HID_USAGE_DESKTOP_Y                    ) ,\
+        HID_LOGICAL_MIN ( 0x0000                                 ) ,\
+        HID_LOGICAL_MAX_N( 0x7FFF, 2                             ) ,\
+        HID_REPORT_COUNT( 2                                      ) ,\
+        HID_REPORT_SIZE ( 16                                     ) ,\
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ) ,\
+        /* Vertical wheel scroll [-127, 127] */ \
+        HID_USAGE       ( HID_USAGE_DESKTOP_WHEEL                )  ,\
+        HID_LOGICAL_MIN ( 0x81                                   )  ,\
+        HID_LOGICAL_MAX ( 0x7f                                   )  ,\
+        HID_REPORT_COUNT( 1                                      )  ,\
+        HID_REPORT_SIZE ( 8                                      )  ,\
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE )  ,\
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_CONSUMER ), \
+       /* Horizontal wheel scroll [-127, 127] */ \
+        HID_USAGE_N     ( HID_USAGE_CONSUMER_AC_PAN, 2           ), \
+        HID_LOGICAL_MIN ( 0x81                                   ), \
+        HID_LOGICAL_MAX ( 0x7f                                   ), \
+        HID_REPORT_COUNT( 1                                      ), \
+        HID_REPORT_SIZE ( 8                                      ), \
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ), \
+    HID_COLLECTION_END                                             ,\
+  HID_COLLECTION_END
+
+static const uint8_t abs_mouse_report_descriptor[] = {
+    TUD_HID_REPORT_DESC_ABSMOUSE(HID_REPORT_ID(HID_REPORT_ID_ABSMOUSE))
+};
+
+typedef struct TU_ATTR_PACKED {
+  uint8_t buttons;
+  uint16_t x;
+  uint16_t y;
+  int8_t wheel;
+  int8_t pan;
+} hid_abs_mouse_report_t;
+
+class USBHIDAbsoluteMouse: public USBHIDDevice {
+private:
+    USBHID hid;
+    uint8_t _buttons;
+    uint16_t _x;
+    uint16_t _y;
+    int8_t _wheel;
+    int8_t _pan;
+public:
+    USBHIDAbsoluteMouse(): hid(), _buttons(0), _x(0), _y(0), _wheel(0), _pan(0) {
+        static bool initialized = false;
+        if (!initialized) {
+            initialized = true;
+            hid.addDevice(this, sizeof(abs_mouse_report_descriptor));
+        }
+    }
+
+    uint16_t _onGetDescriptor(uint8_t* dst) override {
+        memcpy(dst, abs_mouse_report_descriptor, sizeof(abs_mouse_report_descriptor));
+        return sizeof(abs_mouse_report_descriptor);
+    }
+
+    void begin() {
+        hid.begin();
+    }
+
+    void end() {}
+
+    void moveTo(uint16_t x, uint16_t y, int8_t wheel = 0, int8_t pan = 0) {
+        _x = x;
+        _y = y;
+        _wheel = wheel;
+        _pan = pan;
+        hid_abs_mouse_report_t report = {
+            .buttons = _buttons,
+            .x       = _x,
+            .y       = _y,
+            .wheel   = _wheel,
+            .pan     = _pan
+        };
+        hid.SendReport(HID_REPORT_ID_ABSMOUSE, &report, sizeof(report));
+    }
+
+    void buttons(uint8_t b) {
+        if (b != _buttons) {
+            _buttons = b;
+            moveTo(_x, _y, 0, 0);
+        }
+    }
+
+    void press(uint8_t b = MOUSE_LEFT) {
+        buttons(_buttons | b);
+    }
+
+    void release(uint8_t b = MOUSE_LEFT) {
+        buttons(_buttons & ~b);
+    }
+
+    void click(uint8_t b = MOUSE_LEFT) {
+        press(b);
+        delay(10);
+        release(b);
+    }
+};
+
 // --- RUNTIME OBJECTS ---
 // IMPORTANT: FIDO must be declared FIRST so its HID descriptor registers before
 // Keyboard/Mouse/Consumer. Chrome's parse_report_descriptor() reads only the FIRST
@@ -251,6 +378,7 @@ constexpr size_t MSC_DISK_SIZE = MSC_SECTOR_COUNT * MSC_SECTOR_SIZE;
 USBHIDFIDO FIDO;
 USBHIDKeyboard* Keyboard = nullptr;
 USBHIDMouse* Mouse = nullptr;
+USBHIDAbsoluteMouse* AbsMouse = nullptr;
 USBHIDConsumerControl* Consumer = nullptr;
 USBMSC MSC;
 AsyncWebServer server(80);
@@ -526,32 +654,49 @@ void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t 
   xPct = clampInt(static_cast<int>(xPct * 10.0f), 0, 1000) / 10.0f;
   yPct = clampInt(static_cast<int>(yPct * 10.0f), 0, 1000) / 10.0f;
 
-  for (int i = 0; i < 20; i++) {
-    if(Mouse) Mouse->move(-127, -127, 0, 0);
-    delay(1);
-  }
-  delay(10);
+  uint16_t absX = static_cast<uint16_t>((xPct / 100.0f) * 32767.0f);
+  uint16_t absY = static_cast<uint16_t>((yPct / 100.0f) * 32767.0f);
 
-  int targetX = static_cast<int>((xPct / 100.0f) * 1920.0f);
-  int targetY = static_cast<int>((yPct / 100.0f) * 1080.0f);
+  if (AbsMouse) {
+    AbsMouse->moveTo(absX, absY);
+    if (clickButton != 0) {
+      delay(10);
+      if (clickAction == MOUSE_ACTION_DOWN) {
+        AbsMouse->press(clickButton);
+      } else if (clickAction == MOUSE_ACTION_UP) {
+        AbsMouse->release(clickButton);
+      } else {
+        AbsMouse->click(clickButton);
+      }
+    }
+  } else {
+    for (int i = 0; i < 20; i++) {
+      if(Mouse) Mouse->move(-127, -127, 0, 0);
+      delay(1);
+    }
+    delay(10);
 
-  while (targetX > 0 || targetY > 0) {
-    int8_t stepX = static_cast<int8_t>(clampInt(targetX, 0, 120));
-    int8_t stepY = static_cast<int8_t>(clampInt(targetY, 0, 120));
-    if(Mouse) Mouse->move(stepX, stepY, 0, 0);
-    targetX -= stepX;
-    targetY -= stepY;
-    if (targetX > 0 || targetY > 0) delay(1);
-  }
+    int targetX = static_cast<int>((xPct / 100.0f) * 1920.0f);
+    int targetY = static_cast<int>((yPct / 100.0f) * 1080.0f);
 
-  if (clickButton != 0) {
-    delay(15);
-    if (clickAction == MOUSE_ACTION_DOWN) {
-      if(Mouse) Mouse->press(clickButton);
-    } else if (clickAction == MOUSE_ACTION_UP) {
-      if(Mouse) Mouse->release(clickButton);
-    } else {
-      if(Mouse) Mouse->click(clickButton);
+    while (targetX > 0 || targetY > 0) {
+      int8_t stepX = static_cast<int8_t>(clampInt(targetX, 0, 120));
+      int8_t stepY = static_cast<int8_t>(clampInt(targetY, 0, 120));
+      if(Mouse) Mouse->move(stepX, stepY, 0, 0);
+      targetX -= stepX;
+      targetY -= stepY;
+      if (targetX > 0 || targetY > 0) delay(1);
+    }
+
+    if (clickButton != 0) {
+      delay(15);
+      if (clickAction == MOUSE_ACTION_DOWN) {
+        if(Mouse) Mouse->press(clickButton);
+      } else if (clickAction == MOUSE_ACTION_UP) {
+        if(Mouse) Mouse->release(clickButton);
+      } else {
+        if(Mouse) Mouse->click(clickButton);
+      }
     }
   }
 }
@@ -2482,19 +2627,27 @@ bool runActionFile(const String &safeName) {
       int dx = clampInt(parts[2].toInt(), -4096, 4096);
       int dy = clampInt(parts[3].toInt(), -4096, 4096);
       replayMouseDelta(dx, dy);
+    } else if (event == "mouse_abs" && count >= 4) {
+      int x = clampInt(parts[2].toInt(), 0, 32767);
+      int y = clampInt(parts[3].toInt(), 0, 32767);
+      if (AbsMouse) AbsMouse->moveTo(static_cast<uint16_t>(x), static_cast<uint16_t>(y));
     } else if (event == "mouse_scroll" && count >= 4) {
       int wheel = clampInt(parts[2].toInt(), -127, 127);
       int pan = clampInt(parts[3].toInt(), -127, 127);
       if(Mouse) Mouse->move(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
+      if(AbsMouse) AbsMouse->moveTo(0, 0, static_cast<int8_t>(wheel), static_cast<int8_t>(pan));
     } else if (event == "mouse_button" && count >= 4) {
       uint8_t button = parseActionMouseButtonToken(parts[2]);
       uint8_t action = parseActionMouseActionToken(parts[3]);
       if (action == MOUSE_ACTION_DOWN) {
         if(Mouse) Mouse->press(button);
+        if(AbsMouse) AbsMouse->press(button);
       } else if (action == MOUSE_ACTION_UP) {
         if(Mouse) Mouse->release(button);
+        if(AbsMouse) AbsMouse->release(button);
       } else {
         if(Mouse) Mouse->click(button);
+        if(AbsMouse) AbsMouse->click(button);
       }
     } else if (event == "consumer" && count >= 3) {
       uint16_t usage = static_cast<uint16_t>(clampInt(parts[2].toInt(), 0, 0xFFFF));
@@ -2510,6 +2663,7 @@ bool runActionFile(const String &safeName) {
   file.close();
   if(Keyboard) Keyboard->releaseAll();
   if(Mouse) Mouse->release(MOUSE_ALL);
+  if(AbsMouse) AbsMouse->release(MOUSE_ALL);
   if(Consumer) Consumer->release();
   return true;
 }
@@ -5320,9 +5474,11 @@ void setup() {
     // In passkey mode they must NOT exist — FIDO must be the only HID device.
     Keyboard = new USBHIDKeyboard();
     Mouse    = new USBHIDMouse();
+    AbsMouse = new USBHIDAbsoluteMouse();
     Consumer = new USBHIDConsumerControl();
     if(Keyboard) Keyboard->begin();
     if(Mouse) Mouse->begin();
+    if(AbsMouse) AbsMouse->begin();
     if(Consumer) Consumer->begin();
     FIDO.begin(false);
     if (psramFound()) {

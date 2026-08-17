@@ -119,7 +119,9 @@ CHAR_TO_HID = {
 # Input State & Thread-Safe Queue
 # -----------------------------------------------------------------------------
 class KvmState:
-    def __init__(self):
+    MOUSE_BUCKET_MS = 8  # Accumulate mouse moves into 8ms buckets during recording
+
+    def __init__(self, abs_mode=False, screen_width=1920, screen_height=1080):
         self.lock = threading.Lock()
         self.kvm_active = False
         self.seq = 0
@@ -129,13 +131,25 @@ class KvmState:
         self.record_start_ms = 0
         self.last_record_ms = 0   # timestamp of last recorded event (for delta calc)
         self.recorded_lines = []
+        self.abs_mode = abs_mode
+        self.screen_width = screen_width
+        self.screen_height = screen_height
+        self.curr_abs_x = screen_width // 2
+        self.curr_abs_y = screen_height // 2
+
+        # Mouse accumulator for recording (bucket mouse_move events into time windows)
+        self.rec_acc_dx = 0
+        self.rec_acc_dy = 0
+        self.rec_acc_wheel = 0
+        self.rec_acc_pan = 0
+        self.rec_bucket_start_ms = 0  # when current accumulation bucket started
 
         # Keyboard state
         self.modifiers = 0
         self.pressed_keys = set()
         self.kbd_dirty = False
 
-        # Mouse state
+        # Mouse state (for live forwarding to ESP32)
         self.mouse_dx = 0
         self.mouse_dy = 0
         self.mouse_wheel = 0
@@ -158,15 +172,69 @@ class KvmState:
             self.mouse_pan = 0
             self.mouse_buttons = 0
 
-    def add_record_line(self, line):
-        if self.recording:
-            now_ms = time.time() * 1000
-            # Firmware interprets first field as DELTA since previous event, not absolute time
+    def _flush_mouse_bucket(self, now_ms):
+        """Flush accumulated mouse movement as a single recorded event. Call with lock held."""
+        if not self.recording:
+            return
+        dx, dy = self.rec_acc_dx, self.rec_acc_dy
+        wheel, pan = self.rec_acc_wheel, self.rec_acc_pan
+        self.rec_acc_dx = self.rec_acc_dy = 0
+        self.rec_acc_wheel = self.rec_acc_pan = 0
+        self.rec_bucket_start_ms = now_ms
+
+        if dx or dy:
             dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
             self.last_record_ms = now_ms
-            # Firmware splitPipe() requires pipe (|) as delimiter, not spaces
+            if self.abs_mode:
+                self.curr_abs_x = max(0, min(self.screen_width, self.curr_abs_x + dx))
+                self.curr_abs_y = max(0, min(self.screen_height, self.curr_abs_y + dy))
+                norm_x = int((self.curr_abs_x / self.screen_width) * 32767)
+                norm_y = int((self.curr_abs_y / self.screen_height) * 32767)
+                self.recorded_lines.append(f"{dt}|mouse_abs|{norm_x}|{norm_y}")
+            else:
+                self.recorded_lines.append(f"{dt}|mouse_move|{dx}|{dy}")
+        if wheel or pan:
+            dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
+            self.last_record_ms = now_ms
+            self.recorded_lines.append(f"{dt}|mouse_scroll|{wheel}|{pan}")
+
+    def add_mouse_record(self, dx=0, dy=0, wheel=0, pan=0):
+        """Accumulate mouse movement into current time bucket; flush when bucket expires."""
+        if not self.recording:
+            return
+        now_ms = time.time() * 1000
+        if self.rec_bucket_start_ms == 0:
+            self.rec_bucket_start_ms = now_ms
+
+        self.rec_acc_dx += dx
+        self.rec_acc_dy += dy
+        self.rec_acc_wheel += wheel
+        self.rec_acc_pan += pan
+
+        # Flush bucket if time window has elapsed
+        if (now_ms - self.rec_bucket_start_ms) >= self.MOUSE_BUCKET_MS:
+            self._flush_mouse_bucket(now_ms)
+
+    def flush_mouse_record_now(self):
+        """Force-flush mouse accumulator (call before key events so timing is correct)."""
+        if not self.recording:
+            return
+        now_ms = time.time() * 1000
+        if (self.rec_acc_dx or self.rec_acc_dy or self.rec_acc_wheel or self.rec_acc_pan):
+            self._flush_mouse_bucket(now_ms)
+
+    def add_record_line(self, line):
+        """Record a keyboard or mouse-button event (non-movement). Flushes any pending mouse move first."""
+        if self.recording:
+            # Always flush pending mouse accumulation before a key/button event
+            self.flush_mouse_record_now()
+            now_ms = time.time() * 1000
+            dt = int(now_ms - self.last_record_ms) if self.last_record_ms > 0 else 0
+            self.last_record_ms = now_ms
             pipe_line = line.replace(" ", "|")
             self.recorded_lines.append(f"{dt}|{pipe_line}")
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -228,9 +296,9 @@ class UdpSender(threading.Thread):
 
                         if self.state.recording:
                             if dx != 0 or dy != 0:
-                                self.state.add_record_line(f"mouse_move {dx} {dy}")
+                                self.state.add_mouse_record(dx=dx, dy=dy)
                             if wheel != 0 or pan != 0:
-                                self.state.add_record_line(f"mouse_scroll {wheel} {pan}")
+                                self.state.add_mouse_record(wheel=wheel, pan=pan)
 
                 # 3. Heartbeat / Link Alive
                 heartbeat_count += 1
@@ -388,13 +456,13 @@ class ScreenshotServer(threading.Thread):
 # -----------------------------------------------------------------------------
 # Action Replay Engine
 # -----------------------------------------------------------------------------
-def replay_action_file(host, port, file_path):
+def replay_action_file(host, port, file_path, scale=1.0):
     """Replays an action file locally by sending UDP packets."""
     if not os.path.exists(file_path):
         print(f"❌ Action file '{file_path}' not found.")
         return
 
-    print(f"▶️ [REPLAY] Loading action file '{file_path}'...")
+    print(f"▶️ [REPLAY] Loading action file '{file_path}' (mouse_scale={scale})...")
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
@@ -417,9 +485,16 @@ def replay_action_file(host, port, file_path):
 
             cmd = parts[1].lower()
             if cmd == "mouse_move" and len(parts) >= 4:
-                dx, dy = int(parts[2]), int(parts[3])
+                dx = int(int(parts[2]) * scale)
+                dy = int(int(parts[3]) * scale)
                 seq = (seq + 1) & 0xFFFFFFFF
                 pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, dx, dy, 0, 0)
+                sock.sendto(pkt, target)
+            elif cmd == "mouse_scroll" and len(parts) >= 4:
+                wheel = int(parts[2])
+                pan = int(parts[3])
+                seq = (seq + 1) & 0xFFFFFFFF
+                pkt = struct.pack(FMT_MOUSE, PACKET_MAGIC, seq, EVENT_MOUSE, 0, 0, 0, wheel, pan)
                 sock.sendto(pkt, target)
             elif cmd == "mouse_button" and len(parts) >= 4:
                 btn_str, act_str = parts[2].lower(), parts[3].lower()
@@ -561,6 +636,9 @@ def run_evdev_linux(args, state, sender):
                                 state.recorded_lines.clear()
                                 print("\n🔴 [RECORD] STARTED — move mouse & type now...")
                             else:
+                                # Flush any pending mouse accumulation before saving
+                                state.flush_mouse_record_now()
+                                state.rec_bucket_start_ms = 0
                                 n = len(state.recorded_lines)
                                 filename = args.record_file or f"macro_{int(time.time())}.txt"
                                 with open(filename, 'w', encoding='utf-8') as f:
@@ -630,12 +708,12 @@ def run_evdev_linux(args, state, sender):
                         pan = ev.value if ev.code == ecodes.REL_HWHEEL else 0
 
                         if dx or dy:
-                            state.add_record_line(f"mouse_move {dx} {dy}")
+                            state.add_mouse_record(dx=dx, dy=dy)
                             if state.kvm_active:
                                 state.mouse_dx += dx
                                 state.mouse_dy += dy
                         if wheel or pan:
-                            state.add_record_line(f"mouse_scroll {wheel} {pan}")
+                            state.add_mouse_record(wheel=wheel, pan=pan)
                             if state.kvm_active:
                                 state.mouse_wheel += wheel
                                 state.mouse_pan += pan
@@ -647,7 +725,7 @@ def run_evdev_linux(args, state, sender):
                             dx = ev.value - last_abs_x[0]
                             with state.lock:
                                 if abs(dx) < 200:
-                                    state.add_record_line(f"mouse_move {dx} 0")
+                                    state.add_mouse_record(dx=dx)
                                     if state.kvm_active:
                                         state.mouse_dx += dx
                         last_abs_x[0] = ev.value
@@ -656,7 +734,7 @@ def run_evdev_linux(args, state, sender):
                             dy = ev.value - last_abs_y[0]
                             with state.lock:
                                 if abs(dy) < 200:
-                                    state.add_record_line(f"mouse_move 0 {dy}")
+                                    state.add_mouse_record(dy=dy)
                                     if state.kvm_active:
                                         state.mouse_dy += dy
                         last_abs_y[0] = ev.value
@@ -688,10 +766,10 @@ def run_kvm(args):
     print("=" * 65)
 
     if args.replay:
-        replay_action_file(args.ip, args.port, args.replay)
+        replay_action_file(args.ip, args.port, args.replay, scale=args.mouse_scale)
         return
 
-    state = KvmState()
+    state = KvmState(abs_mode=args.abs_mouse, screen_width=args.screen_width, screen_height=args.screen_height)
     sender = UdpSender(args.ip, args.port, state, rate=args.rate, jiggle=args.jiggle)
     sender.start()
 
@@ -703,6 +781,8 @@ def run_kvm(args):
     if platform.system() == 'Linux':
         if run_evdev_linux(args, state, sender):
             print("\n✨ Linux Kernel KVM Client is active!")
+            if args.abs_mouse:
+                print(f"🎯 [MODE] Absolute Mouse Recording Active ({args.screen_width}x{args.screen_height} → 0..32767)")
             print(f"👉 Press [{args.toggle.upper()}] to toggle KVM (mouse & keyboard → target machine).")
             print(f"👉 Press [{args.record_key.upper()}] to Start / Stop Macro Recording (works with or without KVM active).")
             print("👉 Press [Ctrl+C] to exit.")
@@ -789,6 +869,9 @@ def run_kvm(args):
                     state.recorded_lines.clear()
                     print("\n🔴 [RECORD] Macro recording STARTED. Perform your actions...")
                 else:
+                    # Flush any pending mouse accumulation before saving
+                    state.flush_mouse_record_now()
+                    state.rec_bucket_start_ms = 0
                     filename = args.record_file or f"macro_{int(time.time())}.txt"
                     with open(filename, 'w', encoding='utf-8') as f:
                         f.write("# ESP32-S3 Action Macro Recording\n")
@@ -863,6 +946,7 @@ def run_kvm(args):
                 dy = y - state.last_pos[1]
                 state.mouse_dx += int(dx)
                 state.mouse_dy += int(dy)
+                state.add_mouse_record(dx=int(dx), dy=int(dy))
             state.last_pos = (x, y)
 
     def on_mouse_click(x, y, button, pressed):
@@ -901,6 +985,7 @@ def run_kvm(args):
         with state.lock:
             state.mouse_wheel += int(dy)
             state.mouse_pan += int(dx)
+            state.add_mouse_record(wheel=int(dy), pan=int(dx))
 
     kbd_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
     mouse_listener = mouse.Listener(on_move=on_mouse_move, on_click=on_mouse_click, on_scroll=on_mouse_scroll)
@@ -937,6 +1022,10 @@ if __name__ == '__main__':
     parser.add_argument('--record-key', default='f9', help="Toggle Macro Recording hotkey (default: f9)")
     parser.add_argument('--record-file', default='', help="Output filename for macro recording")
     parser.add_argument('--replay', default='', help="Replay a recorded .txt action file")
+    parser.add_argument('--mouse-scale', type=float, default=1.0, help="Movement scaling multiplier for replay (default: 1.0)")
+    parser.add_argument('--abs-mouse', action='store_true', help="Record coordinates in 0..32767 Absolute Mouse mode for 100% resolution independence")
+    parser.add_argument('--screen-width', type=int, default=1920, help="Source screen width for absolute normalization (default: 1920)")
+    parser.add_argument('--screen-height', type=int, default=1080, help="Source screen height for absolute normalization (default: 1080)")
     parser.add_argument('--exclusive', action='store_true', help="Enable exclusive capture mode")
     parser.add_argument('--jiggle', action='store_true', help="Enable subtle keep-awake mouse jiggler")
     parser.add_argument('--preview', action='store_true', help="Start screen capture preview HTTP server")

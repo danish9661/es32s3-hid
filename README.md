@@ -4,14 +4,15 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 
 ---
 
-## Table of Contents
+### Table of Contents
 - [Highlights & Features](#highlights--features)
 - [FIDO2 Hardware Passkeys & Encrypted Vault](#fido2-hardware-passkeys--encrypted-vault)
 - [System Architecture](#system-architecture)
 - [Quick Start Guide](#quick-start-guide)
 - [Network Access & IP Discovery](#network-access--ip-discovery)
 - [Ducky Script Syntax Reference](#ducky-script-syntax-reference)
-- [Host KVM Bridge Setup (Windows)](#host-kvm-bridge-setup-windows)
+- [Universal Cross-Platform KVM Client (`esp32_kvm.py`)](#universal-cross-platform-kvm-client-esp32_kvmpy)
+- [Hardware Absolute Mouse & Resolution Independence](#hardware-absolute-mouse--resolution-independence)
 - [Action Recorder & Replay Engine](#action-recorder--replay-engine)
 - [Typing Engine Tuning Guide](#typing-engine-tuning-guide)
 - [Web OTA Updates](#web-ota-updates)
@@ -31,6 +32,13 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
   - Encrypted with **AES-256-GCM** and **PBKDF2-HMAC-SHA256** (100,000 iterations).
   - Live 2FA TOTP code generator with auto-typing and auto-fill.
   - **Zero-Knowledge Encrypted Backup & Restore (`.esp32vault`)**: 1-click export and import of all 2FA accounts and FIDO2 passkeys with dual NVS flash persistence.
+- **Hardware USB HID Absolute Mouse (`0..32767`)**:
+  - Embedded hardware Absolute Mouse descriptor alongside standard relative mouse.
+  - `(0,0)` is always top-left and `(32767,32767)` is always bottom-right across **all OSes, display scalings, and resolutions**.
+- **Universal Single-File KVM Client (`esp32_kvm.py`)**:
+  - Standalone, ultra-lightweight (<30 KB) Python script running across Linux (Wayland/X11), Windows, and macOS.
+  - Direct Linux kernel `evdev` integration for 0ms low-level key & mouse capture under Wayland.
+  - Live Mouse & Keyboard Macro Recorder, Action Replayer, and Clipboard Typer.
 - **Dual-Core FreeRTOS Architecture**: Core 1 handles heavy script parsing and 2 MB PSRAM payload streaming, while Core 0 runs real-time USB HID events and UDP network ingestion.
 - **Home WiFi & Auto IP Discovery**:
   - Automatically displays assigned Home WiFi IP (Station), Direct AP IP, Gateway, and live RSSI signal strength.
@@ -38,7 +46,7 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 - **Full Ducky Script 2.0 / BadUSB Engine**:
   - Full support for `REPEAT <n>`, `BLOCK...ENDBLOCK` raw text injection, function keys `F1`–`F12`, navigation keys, and compound combinations (`CTRL ALT DELETE`, `CTRL SHIFT ESC`, `ALT F4`, `GUI SHIFT S`).
 - **Low-Latency KVM Bridge (16-byte UDP Protocol)**:
-  - 16-byte binary UDP protocol for mouse/keyboard/multimedia streaming.
+  - 16-byte binary UDP protocol (`0xCAFE`) for mouse/keyboard/multimedia streaming.
   - Automatic sequence resynchronization on host restart and a 1.5s stuck-key safety watchdog.
 - **Virtual Touch 65% Keyboard & Trackpad**:
   - Touch-friendly on-screen keyboard with sticky modifier locks and relative trackpad with scroll gesture.
@@ -92,20 +100,14 @@ ESP32-S3 Project Structure:
 ├── data/                               # LittleFS Web UI Assets
 │   ├── app.html                        # Main single-page console UI
 │   ├── app.js                          # Web client application logic
+│   ├── esp32_kvm.py                    # Universal single-file cross-platform KVM client
 │   ├── login.html                      # Single-operator login page
 │   └── styles.css                      # Modern dark theme stylesheet
-├── server/                             # Host KVM Bridge & Utilities (Python)
-│   ├── clipboard_typer.py              # Windows clipboard to HID typer
-│   ├── hid_keymap.py                   # WinAPI Virtual-Key to HID mapping
-│   ├── preview_http.py                 # Screenshot preview HTTP service
-│   ├── protocol.py                     # 16-byte binary UDP protocol
-│   ├── server.py                       # Main host KVM capture client
-│   ├── state.py                        # Shared state & sequence manager
-│   ├── target_screenshot_server.py     # Lightweight screenshot agent
-│   ├── udp_sender.py                   # High-rate UDP packet sender
-│   └── winapi_hooks.py                 # Low-level WinAPI keyboard/mouse hooks
+├── server/                             # Standalone Host Utilities (Python)
+│   ├── esp32_kvm.py                    # Universal KVM Client & Macro Engine
+│   └── target_screenshot_server.py     # Lightweight screenshot agent
 ├── src/
-│   └── main.cpp                        # Dual-core firmware source code
+│   └── main.cpp                        # Dual-core firmware source code (FIDO2 + HID + Web)
 ├── partitions.csv                      # Partition table (OTA0: 3MB, OTA1: 3MB, LittleFS: 9MB)
 ├── platformio.ini                      # PlatformIO project configuration
 └── README.md                           # Documentation
@@ -178,7 +180,7 @@ The onboard interpreter executes scripts from the web editor or directly from `/
 | `DEFAULT_DELAY <ms>` | Sets delay between every subsequent command | `DEFAULT_DELAY 50` |
 | `REPEAT <n>` | Repeats the previous command $n$ times | `REPEAT 5` |
 | `BLOCK` ... `ENDBLOCK` | Injects raw text block at maximum throughput | `BLOCK`<br>`Multi-line script`<br>`ENDBLOCK` |
-| `MOUSE_MOVE_ABS <x%> <y%>` | Moves cursor to exact screen percentage ($0..100\%$) | `MOUSE_MOVE_ABS 50 50` |
+| `MOUSE_MOVE_ABS <x%> <y%>` | Moves cursor to exact screen percentage ($0..100\%$) via hardware Absolute Mouse | `MOUSE_MOVE_ABS 50 50` |
 | `MOUSE_CLICK_ABS <btn> <x%> <y%>` | Moves and clicks at exact screen percentage | `MOUSE_CLICK_ABS left 50 50` |
 
 ### Special & Navigation Keys
@@ -215,41 +217,60 @@ GUI SHIFT S
 
 ---
 
-## Host KVM Bridge Setup (Windows)
+## Universal Cross-Platform KVM Client (`esp32_kvm.py`)
 
-The host bridge captures your keyboard, mouse, and multimedia controls, streaming them to the ESP32 via low-overhead UDP packets.
+A single-file (<30 KB), zero-latency KVM transmitter, live macro recorder, and replay engine that runs on **Linux (Wayland & X11)**, **Windows**, and **macOS**.
 
-### Running the KVM Host Client
+### Features:
+- **Low-Latency UDP Stream**: 16-byte binary UDP packets (`0xCAFE` magic).
+- **Native Linux Kernel `evdev` Support**: Bypasses Wayland security sandboxing to capture global inputs with 0ms latency.
+- **Action Macro Recorder**: Live record keystrokes and mouse movements into ESP32-compatible `.txt` action files.
+- **Hardware Absolute Mouse Recording**: Record resolution-independent coordinates (`0..32767`).
+- **Clipboard Typer**: Direct keystroke typing from local clipboard via `Ctrl+Alt+V`.
+- **Screen Preview Server**: Built-in HTTP screenshot server (`--preview`, port 8080).
 
-From the project root:
+### Usage:
 
+#### 1. Start KVM Client (Standard Live Forwarding)
 ```bash
-# Shared mode (Host input remains active while KVM is toggled ON)
-python server/server.py --host 192.168.1.55 --toggle-key f8
+# On Linux (Wayland / X11)
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1
 
-# Exclusive mode (Blocks local host input while KVM is ON)
-python server/server.py --host 192.168.1.55 --toggle-key f8 --block-local-input
-
-# Enable anti-sleep mouse jiggler
-python server/server.py --host 192.168.1.55 --toggle-key f8 --jiggle
+# On Windows / macOS
+python data/esp32_kvm.py --ip 192.168.4.1
 ```
 
-### Supported Toggle Keys
-Configure with `--toggle-key <key>`:
-- `f8` (default)
-- `f9`
-- `f10`
-- `f12`
-- `pause`
-- `scrolllock`
+#### 2. Hotkeys & Controls
+- **`[F8]`**: Toggle KVM Mode (**ON** ➔ forwards mouse/keyboard to target; **OFF** ➔ host PC active).
+- **`[F9]`**: Start / Stop Macro Recording (saves directly to `macro_XXXXX.txt`).
+- **`[Ctrl + Alt + V]`**: Type host clipboard text directly into target machine.
+- **`[Ctrl + C]`**: Exit KVM client.
 
-### Target Machine Screenshot Preview Agent
-Run on the target computer to provide live screenshots in the Web UI:
-
+#### 3. Resolution-Independent Absolute Mouse Recording (`--abs-mouse`)
+Records coordinates normalized to `0..32767`, ensuring macros click the exact same UI buttons across **different screen resolutions, display scalings, and OSes**:
 ```bash
-python server/target_screenshot_server.py --port 9988
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --abs-mouse --screen-width 1920 --screen-height 1080
 ```
-Then enter `http://<TARGET_IP>:9988/screenshot.bmp` in the KVM tab.
+
+#### 4. Replay Macro Locally via UDP (`--replay`)
+```bash
+# Standard 1:1 speed replay
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.txt
+
+# Replay with movement scaling (e.g. 70% speed / sensitivity adjustment)
+sudo python3 data/esp32_kvm.py --ip 192.168.4.1 --replay macro_1786988589.txt --mouse-scale 0.7
+```
+
+---
+
+## Hardware Absolute Mouse & Resolution Independence
+
+The ESP32-S3 firmware includes a **dedicated USB HID Absolute Mouse** report descriptor alongside the standard relative mouse:
+
+- Coordinate space: `X: 0..32767`, `Y: 0..32767`.
+- `(0, 0)` is **always top-left corner**.
+- `(32767, 32767)` is **always bottom-right corner**.
+- **100% immune** to OS mouse acceleration curves, pointer sensitivity settings, and monitor resolution differences.
 
 ---
 
@@ -267,6 +288,7 @@ Files are line-delimited with pipe-separated tokens:
 40|key_up|128
 100|combo|1|99|40
 15|mouse_move|12|-8
+15|mouse_abs|16383|16383
 50|mouse_scroll|1|0
 30|mouse_button|left|click
 0|consumer|234
@@ -278,10 +300,17 @@ Files are line-delimited with pipe-separated tokens:
 - `key_up|<code>`
 - `key_release_all`
 - `combo|<flags>|<code>|<hold_ms>` (Flags bitmask: 1=Ctrl, 2=Alt, 4=Shift, 8=Win)
-- `mouse_move|<dx>|<dy>`
+- `mouse_move|<dx>|<dy>` (Relative delta movement)
+- `mouse_abs|<x>|<y>` (Absolute coordinates $0..32767$, resolution-independent)
 - `mouse_scroll|<wheel>|<pan>`
 - `mouse_button|<left|right|middle>|<click|down|up>`
 - `consumer|<usage_id>`
+
+### Uploading & Running on Hardware:
+1. Open the Web Dashboard at `http://esp32-hid.local` (or `http://192.168.4.1`).
+2. Go to the **Scripts / Actions** tab.
+3. Click **Import Action File To ESP** and select your recorded `.txt` file.
+4. Select the file from the dropdown and click **▶ Run Selected** to replay it directly from ESP32 hardware memory.
 
 ---
 
