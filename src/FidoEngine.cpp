@@ -182,9 +182,10 @@ void FidoEngine::handleGetInfo() {
   CborWriter w;
   w.writeMap(9);
 
-  // 01: versions -> ["FIDO_2_0", "FIDO_2_1"]
+  // 01: versions -> ["U2F_V2", "FIDO_2_0", "FIDO_2_1"]
   w.writeInt(0x01);
-  w.writeArray(2);
+  w.writeArray(3);
+  w.writeText("U2F_V2");
   w.writeText("FIDO_2_0");
   w.writeText("FIDO_2_1");
 
@@ -201,12 +202,13 @@ void FidoEngine::handleGetInfo() {
   w.writeInt(0x03);
   w.writeBytes(aaguid, 16);
 
-  // 04: options -> { "rk": true, "up": true, "uv": true, "credMgmt": true, "clientPin": isPinSet(), "largeBlobs": true }
+  // 04: options -> { "rk": true, "up": true, "uv": false, "plat": false, "credMgmt": true, "clientPin": isPinSet(), "largeBlobs": true }
   w.writeInt(0x04);
-  w.writeMap(6);
+  w.writeMap(7);
   w.writeText("rk"); w.writeBool(true);
   w.writeText("up"); w.writeBool(true);
-  w.writeText("uv"); w.writeBool(true);
+  w.writeText("uv"); w.writeBool(false);
+  w.writeText("plat"); w.writeBool(false);
   w.writeText("credMgmt"); w.writeBool(true);
   w.writeText("clientPin"); w.writeBool(FidoStore::isPinSet());
   w.writeText("largeBlobs"); w.writeBool(true);

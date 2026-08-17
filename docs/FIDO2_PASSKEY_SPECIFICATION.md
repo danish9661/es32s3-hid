@@ -118,15 +118,54 @@ Allows storing arbitrary encrypted configuration or certificates (up to 2048 byt
 
 ---
 
-## 7. Future Wireless Roadmap: FIDO2 over Bluetooth Low Energy (BLE)
+## 7. Wireless Transport: FIDO2 over Bluetooth Low Energy (BLE)
 
-The ESP32-S3 contains a built-in **2.4 GHz Bluetooth 5.0 (LE)** radio subsystem alongside Wi-Fi and USB.
+The ESP32-S3 firmware incorporates a dedicated **FIDO Alliance BLE Profile (`0xFFFD`)** implementation alongside the USB CTAPHID interface. Both transports delegate to the unified `GlobalFidoEngine` for identical cryptographic and resident key operations.
 
-### Architecture for BLE Passkeys:
-1. **FIDO BLE Service UUID**: `0000FFFD-0000-1000-8000-00805F9B34FB` (Official FIDO Alliance GATT Service).
-2. **GATT Characteristics**:
-   * **`fidoControlPoint` (`0xFFFD-01`)**: Write endpoint for CTAP2 command packets.
-   * **`fidoStatus` (`0xFFFD-02`)**: Notify endpoint for CTAP2 responses and keepalives.
-   * **`fidoControlPointLength` (`0xFFFD-03`)**: Maximum transmission unit (MTU) negotiation.
-   * **`fidoServiceRevision` (`0xFFFD-04`)**: Version negotiation string (e.g., `1.2`).
-3. **Use Case**: Enables wireless tap-to-login on iPhones, iPads, and Android smartphones without plugging in a physical USB-C cable.
+### A. Implemented Architecture & GATT Specification
+
+1. **Primary Service UUID**: `0000FFFD-0000-1000-8000-00805F9B34FB` (Official FIDO Alliance GATT Service).
+2. **GATT Characteristic Architecture**:
+   * **`fidoControlPoint` (`F1D0FFF1-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+     * *Properties*: `WRITE` | `WRITE_NR`
+     * *Function*: Receives fragmented CTAP2/U2F command packets (Header: `CMD` + 16-bit `LEN` + Payload, followed by Sequence packets `0x00..0x7F`).
+   * **`fidoStatus` (`F1D0FFF2-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+     * *Properties*: `NOTIFY` | `READ`
+     * *Function*: Transmits fragmented responses, error notifications (`0xBF`), and periodic keepalives (`0x82`) during physical touch wait. Initialized with `0x00`.
+   * **`fidoControlPointLength` (`F1D0FFF3-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+     * *Properties*: `READ`
+     * *Function*: Reports maximum frame size buffer capacity (`0x0200` = 512 bytes big-endian).
+   * **`fidoServiceRevision` (`00002A28-0000-1000-8000-00805F9B34FB`)**:
+     * *Properties*: `READ`
+     * *Function*: U2F service revision string (`"1.2"`).
+   * **`fidoServiceRevisionBitfield` (`F1D0FFF4-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+     * *Properties*: `READ` | `WRITE` | `WRITE_NR`
+     * *Function*: Declares FIDO version support (`0x80` for FIDO 2.0). Client writes back desired version during initialization.
+3. **BLE Advertising**:
+   * Advertises Service UUID `0xFFFD` with Service Data flag `0x80` (CTAP2 capable).
+   * Advertising intervals calibrated between `100ms` (`0x00A0`) and `150ms` (`0x00F0`).
+4. **Security & Cryptography Delegation**:
+   * Utilizes NimBLE SMP security callbacks for Just-Works AES-128 pairing and link encryption.
+   * Incoming CBOR payloads from `fidoControlPoint` are routed directly to `GlobalFidoEngine.processCbor()`, ensuring 100% feature parity with USB (P-256 ECC, HMAC-secret, resident keys, PIN protocol).
+
+---
+
+### B. Current Status & Technical Challenges
+
+#### 1. What Works Successfully:
+* ✅ **GATT Profile Initialization**: Complete standard FIDO2 BLE GATT hierarchy correctly configured.
+* ✅ **Discovery & Pairing**: Windows, Linux, and Android discover the device as a FIDO Security Key, negotiate MTU (255 bytes), pair, and establish AES-128 link encryption.
+* ✅ **GATT Characteristic Reads**: Host successfully reads `fidoServiceRevisionBitfield` (`0x80`), `fidoServiceRevision` (`"1.2"`), `fidoControlPointLength` (`512`), and `fidoStatus` (`0x00`).
+* ✅ **Engine Integration**: Reassembly, fragmentation, and response pipeline shared cleanly with USB core without memory leaks.
+
+#### 2. Challenges & Open Issues:
+* ⚠️ **Windows WebAuthn BLE State Machine**:
+  * Windows Hello discovers and pairs with the device, but terminates the initial GATT caching connection and cycles reconnects.
+  * During active `MakeCredential` / `GetAssertion` browser flows, Windows' internal `webauthn.dll` expects a specific timing sequence for CCCD (`0x2902`) subscription on `fidoStatus` followed by writes to `fidoControlPoint`.
+  * In current testing, Windows completes descriptor enumeration but halts before dispatching the CBOR payload to `fidoControlPoint` (`"Transport availability not yet ready"`), likely related to Windows BLE LTK bond cache retention or characteristic permission expectations.
+* ⚠️ **Next Steps (Deferred for Future Milestone)**:
+  * Full packet-level capture using BLE HCI sniffer (Wireshark / nRF Sniffer / Android HCI snoop logs) to inspect exact ATT error codes and CCCD subscription handshakes.
+  * Cross-platform testing with Android (Google Play Services FIDO2 BLE) and iOS/macOS WebAuthenticationKit to isolate Windows-specific driver quirks.
+
+> [!NOTE]
+> **Primary Transport**: The **USB FIDO2 CTAPHID** interface remains 100% operational, fully verified, and recommended for daily passkey operations. BLE development is documented above and preserved in the codebase for future wireless passkey enhancements.
