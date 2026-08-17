@@ -167,17 +167,41 @@ bool FidoStore::loadFromStorage() {
     prefs.end();
   }
 
-  if (!LittleFS.exists("/passkeys.json")) {
+  String jsonContent = "";
+  if (LittleFS.exists("/passkeys.json")) {
+    File f = LittleFS.open("/passkeys.json", "r");
+    if (f) {
+      jsonContent = f.readString();
+      f.close();
+    }
+  }
+
+  // If passkeys.json is missing in LittleFS (e.g. after uploadfs / OTA filesystem update),
+  // automatically restore from non-volatile NVS flash backup!
+  if (jsonContent.isEmpty()) {
+    Preferences nvs;
+    if (nvs.begin("fido_nvs", true)) {
+      if (nvs.isKey("pkeys_json")) {
+        jsonContent = nvs.getString("pkeys_json", "");
+        if (!jsonContent.isEmpty()) {
+          Serial.printf("[FIDO2] Restored passkeys.json (%u bytes) from NVS backup!\n", jsonContent.length());
+          File f = LittleFS.open("/passkeys.json", "w");
+          if (f) {
+            f.print(jsonContent);
+            f.close();
+          }
+        }
+      }
+      nvs.end();
+    }
+  }
+
+  if (jsonContent.isEmpty()) {
     return false;
   }
 
-  File f = LittleFS.open("/passkeys.json", "r");
-  if (!f) return false;
-
   DynamicJsonDocument doc(16384);
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-
+  DeserializationError err = deserializeJson(doc, jsonContent);
   if (err != DeserializationError::Ok || !doc.is<JsonArray>()) {
     return false;
   }
@@ -210,12 +234,6 @@ bool FidoStore::loadFromStorage() {
 }
 
 bool FidoStore::saveToStorage() {
-  Preferences prefs;
-  if (prefs.begin("fido_nvs", false)) {
-    prefs.putUInt("counter", globalCounter);
-    prefs.end();
-  }
-
   DynamicJsonDocument doc(16384);
   JsonArray arr = doc.to<JsonArray>();
 
@@ -234,10 +252,23 @@ bool FidoStore::saveToStorage() {
     obj["createdAt"] = c.createdAt;
   }
 
+  String jsonStr;
+  serializeJson(doc, jsonStr);
+
+  // 1. Save to LittleFS
   File f = LittleFS.open("/passkeys.json", "w");
-  if (!f) return false;
-  serializeJson(doc, f);
-  f.close();
+  if (f) {
+    f.print(jsonStr);
+    f.close();
+  }
+
+  // 2. Dual-save to NVS flash backup (survives uploadfs and OTA littlefs updates!)
+  Preferences prefs;
+  if (prefs.begin("fido_nvs", false)) {
+    prefs.putUInt("counter", globalCounter);
+    prefs.putString("pkeys_json", jsonStr);
+    prefs.end();
+  }
 
   return true;
 }
@@ -350,6 +381,7 @@ void FidoStore::clearAll() {
   clearPin();
   clearLargeBlob();
 
+  LittleFS.remove("/passkeys.json");
   LittleFS.remove("/fido_credentials.json");
 
   Preferences prefs;

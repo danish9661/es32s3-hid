@@ -170,30 +170,32 @@
               <p>No items in your vault yet. Click <strong>+ Add Item</strong> to add your first 2FA authenticator or password.</p>
             </div>
             <div id="vault-action-status" class="status-line"></div>
+          </div>
 
-            <!-- FIDO2 Hardware Passkeys Section -->
-            <div class="network-info-card" style="margin-top:24px;">
-              <div class="network-head">
-                <div>
-                  <h4 style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <span>🛡️ Hardware Passkeys (FIDO2 / WebAuthn CTAP2)</span>
-                    <span id="fido-mode-badge" class="badge ok">Normal Ducky Mode</span>
-                    <span id="fido-touch-badge" class="badge hidden" style="background:#00f3ff; color:#070b14; font-weight:700;">⚠️ Touch BOOT Button</span>
-                  </h4>
-                  <p class="small" style="margin:2px 0 0;">Dedicated security key profile for Chrome, Google, GitHub, Apple & Microsoft. 💡 <em>Hold physical BOOT button 2.5s on board to toggle mode anytime.</em></p>
-                </div>
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                  <button type="button" id="fido-toggle-mode-btn" class="btn-primary btn-sm">🛡️ Switch to Passkey Mode</button>
-                  <button type="button" id="fido-test-register-btn" class="btn-outline btn-sm">🔑 Test Passkey</button>
-                  <button type="button" id="fido-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
-                  <button type="button" id="fido-reset-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Reset Passkeys</button>
-                </div>
+          <!-- FIDO2 Hardware Passkeys Section (Always accessible) -->
+          <div class="network-info-card" style="margin-top:24px;">
+            <div class="network-head">
+              <div>
+                <h4 style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <span>🛡️ Hardware Passkeys (FIDO2 / WebAuthn CTAP2)</span>
+                  <span id="fido-mode-badge" class="badge ok">Normal Ducky Mode</span>
+                  <span id="fido-pin-badge" class="badge">PIN: Not Set</span>
+                  <span id="fido-touch-badge" class="badge hidden" style="background:#00f3ff; color:#070b14; font-weight:700;">⚠️ Touch BOOT Button</span>
+                </h4>
+                <p class="small" style="margin:2px 0 0;">Dedicated physical security key for Chrome, Google, GitHub, Apple, Microsoft & Android. 💡 <em>Hold physical BOOT button 2.5s on board to toggle mode anytime.</em></p>
               </div>
-              <div id="fido-passkeys-list" class="files-list" style="margin-top:12px; max-height:180px; overflow-y:auto;">
-                <!-- Registered Passkeys -->
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <button type="button" id="fido-toggle-mode-btn" class="btn-primary btn-sm">🛡️ Switch to Passkey Mode</button>
+                <button type="button" id="fido-test-register-btn" class="btn-outline btn-sm">🔑 Test Passkey</button>
+                <button type="button" id="fido-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
+                <button type="button" id="fido-clear-pin-btn" class="btn-outline btn-sm hidden" style="color:#f59e0b; border-color:rgba(245,158,11,0.3);">🔓 Clear PIN</button>
+                <button type="button" id="fido-reset-btn" class="btn-outline btn-sm" style="color:var(--danger); border-color:rgba(244,63,94,0.3);">🗑️ Reset Security Key</button>
               </div>
-              <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
             </div>
+            <div id="fido-passkeys-list" class="files-list" style="margin-top:12px; max-height:220px; overflow-y:auto;">
+              <!-- Registered Passkeys -->
+            </div>
+            <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
           </div>
 
           <!-- Add / Edit Modal -->

@@ -4627,6 +4627,9 @@ void registerRoutes() {
     doc["waiting_for_touch"] = FIDO.isWaitingForTouch();
     doc["pending_rp"] = FIDO.getPendingRpId();
     doc["security_key_mode"] = fidoSecurityKeyMode;
+    doc["pin_set"] = FidoStore::isPinSet();
+    doc["pin_retries"] = FidoStore::getPinRetries();
+    doc["credential_count"] = FidoStore::getAllCredentials().size();
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
@@ -4661,9 +4664,36 @@ void registerRoutes() {
   server.on("/api/fido/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!requireAuth(request)) return;
     FidoStore::clearAll();
-    logSystem("[FIDO2] All Passkeys and Authenticator credentials reset");
+    logSystem("[FIDO2] Hardware Security Key Factory Reset: All passkeys and PIN cleared");
     request->send(200, "application/json", "{\"ok\":true,\"reset\":true}");
   });
+
+  server.on("/api/fido/pin/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    FidoStore::clearPin();
+    logSystem("[FIDO2] Security Key PIN cleared");
+    request->send(200, "application/json", "{\"ok\":true,\"pin_cleared\":true}");
+  });
+
+  server.on("/api/fido/credential/delete", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      const char *credIdHex = doc["credId"] | "";
+      if (strlen(credIdHex) == 0) {
+        request->send(400, "application/json", "{\"error\":\"Missing credId\"}");
+        return;
+      }
+      std::vector<uint8_t> credId;
+      for (size_t i = 0; i + 1 < strlen(credIdHex); i += 2) {
+        char sub[3] = { credIdHex[i], credIdHex[i+1], '\0' };
+        credId.push_back(static_cast<uint8_t>(strtol(sub, nullptr, 16)));
+      }
+      bool ok = FidoStore::deleteCredential(credId);
+      request->send(ok ? 200 : 404, "application/json", ok ? "{\"ok\":true,\"deleted\":true}" : "{\"error\":\"Credential not found\"}");
+    }
+  );
 }
 
 void setup() {

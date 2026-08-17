@@ -3125,6 +3125,8 @@ function renderVaultEntries() {
 async function loadFidoStatus() {
   const list = qs("fido-passkeys-list");
   const touchBadge = qs("fido-touch-badge");
+  const pinBadge = qs("fido-pin-badge");
+  const clearPinBtn = qs("fido-clear-pin-btn");
   if (!list) return;
   try {
     const res = await api("/api/fido/status");
@@ -3148,6 +3150,20 @@ async function loadFidoStatus() {
       toggleBtn.textContent = data.security_key_mode ? "💻 Switch to Normal Ducky Mode" : "🛡️ Switch to Passkey Mode";
     }
 
+    if (pinBadge) {
+      if (data.pin_set) {
+        pinBadge.className = "badge ok";
+        pinBadge.textContent = `🔑 PIN: Configured (${data.pin_retries ?? 8}/8 retries)`;
+      } else {
+        pinBadge.className = "badge";
+        pinBadge.textContent = "🔓 PIN: Not Set";
+      }
+    }
+
+    if (clearPinBtn) {
+      clearPinBtn.classList.toggle("hidden", !data.pin_set);
+    }
+
     if (touchBadge) {
       touchBadge.classList.toggle("hidden", !data.waiting_for_touch);
       if (data.waiting_for_touch) {
@@ -3164,7 +3180,9 @@ async function loadFidoStatus() {
     data.credentials.forEach((c) => {
       const item = document.createElement("div");
       item.className = "file-item";
-      item.style.cursor = "default";
+      item.style.display = "flex";
+      item.style.justifyContent = "space-between";
+      item.style.alignItems = "center";
       item.innerHTML = `
         <div style="display:flex; align-items:center; gap:8px;">
           <span>🔑</span>
@@ -3173,8 +3191,25 @@ async function loadFidoStatus() {
             <div class="small" style="color:var(--muted); font-size:11px;">User: ${escapeHtml(c.userName || "N/A")} • Counter: ${c.signCounter}</div>
           </div>
         </div>
-        <span class="badge ok" style="font-size:10px;">Hardware Resident</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="badge ok" style="font-size:10px;">Hardware Resident</span>
+          <button type="button" class="btn-outline btn-sm fido-del-cred-btn" data-id="${escapeHtml(c.credId || '')}" style="color:var(--danger); border-color:rgba(244,63,94,0.3); font-size:10px; padding:2px 6px;">🗑️</button>
+        </div>
       `;
+      const delBtn = item.querySelector(".fido-del-cred-btn");
+      delBtn?.addEventListener("click", async () => {
+        if (!confirm(`Delete passkey for ${c.rpId}?`)) return;
+        try {
+          await api("/api/fido/credential/delete", {
+            method: "POST",
+            body: JSON.stringify({ credId: c.credId })
+          });
+          setText("fido-status-msg", `Passkey for ${c.rpId} deleted.`);
+          await loadFidoStatus();
+        } catch (_) {
+          setText("fido-status-msg", "Failed to delete passkey.");
+        }
+      });
       list.appendChild(item);
     });
   } catch (_) {}
@@ -3194,14 +3229,26 @@ function bindFidoControls() {
   });
 
   qs("fido-refresh-btn")?.addEventListener("click", loadFidoStatus);
-  qs("fido-reset-btn")?.addEventListener("click", async () => {
-    if (!confirm("Are you sure you want to reset and delete all registered FIDO2 / WebAuthn passkeys?")) return;
+
+  qs("fido-clear-pin-btn")?.addEventListener("click", async () => {
+    if (!confirm("Clear and remove the Security Key PIN? Stored passkeys will be preserved.")) return;
     try {
-      await api("/api/fido/reset", { method: "POST" });
-      setText("fido-status-msg", "All hardware passkeys cleared.");
+      await api("/api/fido/pin/clear", { method: "POST" });
+      setText("fido-status-msg", "Security Key PIN removed successfully.");
       await loadFidoStatus();
     } catch (_) {
-      setText("fido-status-msg", "Failed to reset passkeys.");
+      setText("fido-status-msg", "Failed to clear PIN.");
+    }
+  });
+
+  qs("fido-reset-btn")?.addEventListener("click", async () => {
+    if (!confirm("⚠️ Factory Reset Security Key? This will wipe all registered FIDO2 / WebAuthn passkeys and reset the PIN.")) return;
+    try {
+      await api("/api/fido/reset", { method: "POST" });
+      setText("fido-status-msg", "All hardware passkeys and PIN wiped (Factory Reset complete).");
+      await loadFidoStatus();
+    } catch (_) {
+      setText("fido-status-msg", "Failed to reset security key.");
     }
   });
 
