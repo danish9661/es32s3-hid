@@ -221,6 +221,8 @@ bool FidoStore::loadFromStorage() {
     c.pubKeyY = fromHex(obj["pubKeyY"] | "");
     c.signCounter = obj["signCounter"] | 0;
     c.createdAt = obj["createdAt"] | 0;
+    c.credProtect = obj["credProtect"] | 1;
+    c.algorithm = obj["algorithm"] | -7;
     c.hmacSecretKey = fromHex(obj["hmacSecretKey"] | "");
     if (c.hmacSecretKey.empty()) {
       c.hmacSecretKey.resize(32);
@@ -252,6 +254,8 @@ bool FidoStore::saveToStorage() {
     obj["hmacSecretKey"] = toHex(c.hmacSecretKey.data(), c.hmacSecretKey.size());
     obj["signCounter"] = c.signCounter;
     obj["createdAt"] = c.createdAt;
+    obj["credProtect"] = c.credProtect;
+    obj["algorithm"] = c.algorithm;
   }
 
   String jsonStr;
@@ -577,6 +581,15 @@ bool FidoStore::verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pi
   uint8_t computedAuth[32];
   hmacSha256(currentPinToken, 32, clientDataHash32, 32, computedAuth);
   return memcmp(computedAuth, pinAuth16, 16) == 0;
+}
+
+bool FidoStore::isPinTokenValid() {
+  return pinTokenValid;
+}
+
+void FidoStore::invalidatePinToken() {
+  pinTokenValid = false;
+  memset(currentPinToken, 0, 32);
 }
 
 FidoCredential* FidoStore::findCredential(const std::vector<uint8_t> &credId) {

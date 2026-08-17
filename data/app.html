@@ -270,7 +270,21 @@
                   <div id="inspect-hmac-badge" class="badge ok">Supported (WebAuthn PRF Enabled)</div>
                 </div>
 
-                <div style="margin-top:16px; text-align:right;">
+                <div style="margin-top:12px; padding:10px 12px; background:rgba(0,243,255,0.04); border:1px solid rgba(0,243,255,0.15); border-radius:8px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <label class="label" style="margin:0; font-weight:600;">🛡️ CredProtect Policy (PIN Enforcement)</label>
+                    <span id="inspect-policy-badge" class="badge">Level 1</span>
+                  </div>
+                  <select class="input" id="inspect-cred-policy-select" style="font-size:0.85rem; padding:6px 10px;">
+                    <option value="1">🟢 Level 1: Standard (Touch Only / UV Optional)</option>
+                    <option value="2">🟡 Level 2: Smart (AllowList Required)</option>
+                    <option value="3">🔴 Level 3: Strict PIN Enforcement (Always Require PIN)</option>
+                  </select>
+                  <div class="small" style="color:var(--muted); font-size:11px; margin-top:4px;">Level 3 forces the hardware key to demand your PIN, preventing logins by touch alone.</div>
+                </div>
+
+                <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center;">
+                  <span id="inspect-policy-status" class="status-line"></span>
                   <button type="button" id="fido-inspect-close-btn" class="btn-primary btn-sm">Close</button>
                 </div>
               </div>

@@ -42,8 +42,10 @@ struct FidoCredential {
   std::vector<uint8_t> pubKeyX;  // 32-byte X coordinate
   std::vector<uint8_t> pubKeyY;  // 32-byte Y coordinate
   std::vector<uint8_t> hmacSecretKey; // 32-byte master HMAC secret for hmac-secret / prf extension
-  uint32_t signCounter;
-  uint32_t createdAt;
+  uint32_t signCounter = 0;
+  uint32_t createdAt = 0;
+  uint8_t credProtect = 1;       // 1 = userVerificationOptional, 2 = optionalWithList, 3 = userVerificationRequired
+  int algorithm = -7;            // -7 = ES256 (NIST P-256), -8 = EdDSA (Ed25519)
 };
 
 class FidoStore {
@@ -126,6 +128,8 @@ public:
 
   static void getPinToken(uint8_t *out32);
   static bool verifyPinAuth(const uint8_t *clientDataHash32, const uint8_t *pinAuth16);
+  static bool isPinTokenValid();
+  static void invalidatePinToken();
 
   // Biometric UV Emulation
   static bool getEmulateUv();

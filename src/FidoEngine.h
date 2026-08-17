@@ -20,6 +20,7 @@ struct FidoRequestContext {
   String userDisplayName;
   std::vector<std::vector<uint8_t>> allowList;
   bool upRequired;
+  uint8_t requestedCredProtect;
   uint32_t requestTime;
 };
 

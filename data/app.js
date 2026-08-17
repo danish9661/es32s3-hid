@@ -3315,6 +3315,54 @@ function openFidoInspectModal(c) {
     }
   }
 
+  const policySelect = qs("inspect-cred-policy-select");
+  const policyBadge = qs("inspect-policy-badge");
+  setText("inspect-policy-status", "");
+
+  const updateBadge = (lvl) => {
+    if (!policyBadge) return;
+    if (lvl === 3) {
+      policyBadge.className = "badge";
+      policyBadge.style.background = "#f43f5e";
+      policyBadge.style.color = "#ffffff";
+      policyBadge.textContent = "🔴 Level 3: Strict PIN";
+    } else if (lvl === 2) {
+      policyBadge.className = "badge";
+      policyBadge.style.background = "#f59e0b";
+      policyBadge.style.color = "#070b14";
+      policyBadge.textContent = "🟡 Level 2: Smart";
+    } else {
+      policyBadge.className = "badge ok";
+      policyBadge.textContent = "🟢 Level 1: Standard";
+    }
+  };
+
+  if (policySelect) {
+    const curPolicy = Number(c.credProtect || 1);
+    policySelect.value = String(curPolicy);
+    updateBadge(curPolicy);
+
+    policySelect.onchange = async () => {
+      const newPolicy = Number(policySelect.value);
+      updateBadge(newPolicy);
+      try {
+        setText("inspect-policy-status", "Updating policy...");
+        const res = await api("/api/fido/credential/policy", {
+          method: "POST",
+          body: JSON.stringify({ credId: c.credId, credProtect: newPolicy })
+        });
+        if (res.ok) {
+          c.credProtect = newPolicy;
+          setText("inspect-policy-status", "✅ Policy saved!");
+        } else {
+          setText("inspect-policy-status", "Failed to update policy.");
+        }
+      } catch (_) {
+        setText("inspect-policy-status", "Network error.");
+      }
+    };
+  }
+
   modal.classList.remove("hidden");
 }
 

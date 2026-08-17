@@ -71,6 +71,20 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
       }
     }
 
+    // Extract credProtect extension policy if present (default: 1)
+    pendingReq.requestedCredProtect = 1;
+    for (size_t i = 0; i + 12 < cborLen; i++) {
+      if (memcmp(cborPayload + i, "credProtect", 11) == 0) {
+        uint8_t nextVal = cborPayload[i + 11];
+        if (nextVal >= 0x01 && nextVal <= 0x03) {
+          pendingReq.requestedCredProtect = nextVal;
+        } else if (i + 12 < cborLen && cborPayload[i + 12] >= 0x01 && cborPayload[i + 12] <= 0x03) {
+          pendingReq.requestedCredProtect = cborPayload[i + 12];
+        }
+        break;
+      }
+    }
+
     // Await User Presence Touch (BOOT button)
     waitingForTouch = true;
     pendingAction = FIDO_ACTION_MAKE_CREDENTIAL;
@@ -118,33 +132,27 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
     // 4. Check if options.up == false (Silent presence check)
     pendingReq.upRequired = true;
     for (size_t i = 0; i + 3 < cborLen; i++) {
-      if (cborPayload[i] == 0x62 && cborPayload[i+1] == 'u' && cborPayload[i+2] == 'p' && cborPayload[i+3] == 0xF4) {
+      if (cborPayload[i] == 0x62 && cborPayload[i+1] == 'u' && cborPayload[i+2] == 'p' && cborPayload[i+3] == 0xF4) { // "up": false
         pendingReq.upRequired = false;
         break;
       }
-    }
-
-    if (!pendingReq.upRequired) {
-      executeGetAssertion();
-      return;
     }
 
     // Await User Presence Touch (BOOT button)
     waitingForTouch = true;
     pendingAction = FIDO_ACTION_GET_ASSERTION;
 
-    // Initial keepalive
     sendKeepalive(0x01); // USER_PRESENCE_NEEDED
     return;
   }
 
-  if (ctap2Cmd == 0x03 || ctap2Cmd == 0x08) { // authenticatorGetNextAssertion
-    sendResponse(CTAP2_ERR_NOT_ALLOWED, nullptr, 0);
+  if (ctap2Cmd == 0x04) { // authenticatorGetInfo
+    handleGetInfo();
     return;
   }
 
   if (ctap2Cmd == 0x06) { // authenticatorClientPIN
-    handleClientPin(data, len);
+    handleClientPin(cborPayload, cborLen);
     return;
   }
 
@@ -153,29 +161,22 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
     pendingReq.requestTime = millis();
     waitingForTouch = true;
     pendingAction = FIDO_ACTION_RESET;
-
-    sendKeepalive(0x01); // USER_PRESENCE_NEEDED
+    sendKeepalive(0x01);
     return;
   }
 
-  if (ctap2Cmd == 0x0A) { // authenticatorCredentialManagement
-    handleCredentialManagement(data, len);
+  if (ctap2Cmd == 0x0B) { // authenticatorLargeBlobs
+    handleLargeBlob(cborPayload, cborLen);
     return;
   }
 
-  if (ctap2Cmd == 0x0B) { // authenticatorSelection
-    CborWriter resp;
-    resp.writeMap(0);
-    sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
+  if (ctap2Cmd == 0x0C) { // authenticatorCredentialManagement
+    handleCredentialManagement(cborPayload, cborLen);
     return;
   }
 
-  if (ctap2Cmd == 0x0C) { // authenticatorLargeBlobs
-    handleLargeBlob(data, len);
-    return;
-  }
-
-  sendResponse(CTAP2_ERR_INVALID_COMMAND, nullptr, 0);
+  // Unsupported command
+  sendResponse(CTAP2_ERR_UNSUPPORTED_OPTION, nullptr, 0);
 }
 
 void FidoEngine::handleGetInfo() {
@@ -189,12 +190,13 @@ void FidoEngine::handleGetInfo() {
   w.writeText("FIDO_2_0");
   w.writeText("FIDO_2_1");
 
-  // 02: extensions -> ["credProps", "hmac-secret", "largeBlobKey"]
+  // 02: extensions -> ["credProps", "hmac-secret", "largeBlobKey", "credProtect"]
   w.writeInt(0x02);
-  w.writeArray(3);
+  w.writeArray(4);
   w.writeText("credProps");
   w.writeText("hmac-secret");
   w.writeText("largeBlobKey");
+  w.writeText("credProtect");
 
   // 03: aaguid -> 16 zero bytes
   uint8_t aaguid[16];
@@ -246,6 +248,8 @@ void FidoEngine::executeMakeCredential() {
     sendResponse(CTAP2_ERR_OPERATION_DENIED, nullptr, 0);
     return;
   }
+  cred.credProtect = pendingReq.requestedCredProtect;
+  FidoStore::saveToStorage();
 
   // Construct Authenticator Data
   uint8_t rpHash[32];
@@ -322,6 +326,14 @@ void FidoEngine::executeGetAssertion() {
   if (!cred) {
     sendResponse(CTAP2_ERR_NO_CREDENTIALS, nullptr, 0);
     return;
+  }
+
+  // CredProtect Level 3 enforcement (userVerificationRequired)
+  if (cred->credProtect == 3) {
+    if (!FidoStore::getEmulateUv() && FidoStore::isPinSet() && !FidoStore::isPinTokenValid()) {
+      sendResponse(CTAP2_ERR_PIN_REQUIRED, nullptr, 0);
+      return;
+    }
   }
 
   // Construct Authenticator Data

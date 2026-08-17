@@ -2805,10 +2805,10 @@ void connectWiFi() {
 }
 
 bool uiFilesPresent() {
-  return LittleFS.exists("/login.html") &&
-         LittleFS.exists("/app.html") &&
-         LittleFS.exists("/styles.css") &&
-         LittleFS.exists("/app.js");
+  return (LittleFS.exists("/login.html") || LittleFS.exists("/login.html.gz")) &&
+         (LittleFS.exists("/app.html") || LittleFS.exists("/app.html.gz")) &&
+         (LittleFS.exists("/styles.css") || LittleFS.exists("/styles.css.gz")) &&
+         (LittleFS.exists("/app.js") || LittleFS.exists("/app.js.gz"));
 }
 
 void handlePayloadUpload(
@@ -4670,6 +4670,7 @@ void registerRoutes() {
       }
       obj["userId"] = userHex;
       obj["hasHmacSecret"] = !c.hmacSecretKey.empty();
+      obj["credProtect"] = c.credProtect;
     }
     doc["waiting_for_touch"] = FIDO.isWaitingForTouch();
     doc["pending_rp"] = FIDO.getPendingRpId();
@@ -5085,6 +5086,42 @@ void registerRoutes() {
       request->send(ok ? 200 : 404, "application/json", ok ? "{\"ok\":true,\"deleted\":true}" : "{\"error\":\"Credential not found\"}");
     }
   );
+
+  server.on("/api/fido/credential/policy", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, data, len);
+      const char *credIdHex = doc["credId"] | "";
+      uint8_t policy = doc["credProtect"] | 1;
+      if (policy < 1 || policy > 3) policy = 1;
+
+      if (strlen(credIdHex) == 0) {
+        request->send(400, "application/json", "{\"error\":\"Missing credId\"}");
+        return;
+      }
+      std::vector<uint8_t> targetCredId;
+      for (size_t i = 0; i + 1 < strlen(credIdHex); i += 2) {
+        char sub[3] = { credIdHex[i], credIdHex[i+1], '\0' };
+        targetCredId.push_back(static_cast<uint8_t>(strtol(sub, nullptr, 16)));
+      }
+
+      bool found = false;
+      for (auto &c : FidoStore::getAllCredentials()) {
+        if (c.credId == targetCredId) {
+          c.credProtect = policy;
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        FidoStore::saveToStorage();
+        request->send(200, "application/json", "{\"ok\":true,\"credProtect\":" + String(policy) + "}");
+      } else {
+        request->send(404, "application/json", "{\"error\":\"Credential not found\"}");
+      }
+    }
+  );
 }
 
 void setup() {
@@ -5099,10 +5136,18 @@ void setup() {
   pixels_alt.setBrightness(clampInt(ledBrightness, 0, 255));
   setStatus(0, 0, 255);
 
-  if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS mount failed, retrying...");
+  // Safe non-destructive LittleFS mount
+  if (!LittleFS.begin(false)) {
+    Serial.println("[FS] Initial LittleFS mount failed, retrying in 300ms...");
     delay(300);
-    LittleFS.begin(true);
+    if (!LittleFS.begin(false)) {
+      Serial.println("[FS] Retrying mount with formatOnFail=false...");
+      delay(500);
+      if (!LittleFS.begin(false)) {
+        Serial.println("[FS] LittleFS unformatted. Initializing fresh filesystem...");
+        LittleFS.begin(true);
+      }
+    }
   }
 
   ensureScriptDir();
