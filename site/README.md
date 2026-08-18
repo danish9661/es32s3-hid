@@ -10,38 +10,41 @@
 
 ---
 
-## Overview
+## 1. Overview
 
-The **ESP32-S3 HID Console & Security Hub** is a multi-role USB hardware security key, keystroke injection platform, and ultra-low latency KVM bridge designed for the **ESP32-S3-DevKitC-1-N16R8** (16 MB Quad-SPI Flash, 8 MB Octal PSRAM).
+The **ESP32-S3 HID Console & Security Hub** is a multi-role hardware platform designed for the **ESP32-S3 N16R8** (16 MB Flash, 8 MB Octal PSRAM).
 
-It unifies three major subsystems into a single hardware controller:
+It unifies three major subsystems into a single pocket-sized microcontroller:
 1. **FIDO2 / WebAuthn Hardware Security Key (CTAP 2.1)** with hardware touch confirmation, PIN protection, and dedicated X.509 Batch Attestation certificates.
 2. **Yubico YubiKey 5A Security Engine** with native `ykman 5.9.2` management, ISO 7816 OATH (TOTP/HOTP) 2FA applet, KeePassXC 20-byte HMAC-SHA1 challenge-response, and dual touch slots.
 3. **BadUSB & Low-Latency Web KVM Bridge** with 2 MB USB Virtual Storage (`DUCKY_DRIVE`), Ducky Script 2.0 parser, and cross-platform mouse/keyboard streaming client (`esp32_kvm.py`).
 
 ---
 
-## Feature Matrix
+## 2. Complete Capabilities Matrix
 
-| Feature Subsystem | Standard Keystroke Dongle | Standard FIDO2 Token | This ESP32-S3 Security Hub |
-| :--- | :---: | :---: | :---: |
-| **Passkeys / WebAuthn** | None | Basic CTAP 2.0 | **Full CTAP 2.1** (`rk`, `up`, `uv`, `minPinLength: 4..63`, `credProtect`) |
-| **HMAC Secret / PRF** | None | Rare | **HMAC-Secret Extension** (1Password / Bitwarden offline vault encryption) |
-| **Large Blobs Storage** | None | None | **2048-Byte Large Blobs** (SSH certificates & metadata storage) |
-| **Attestation** | None | Self-Attested | **X.509 EC P-256 Batch Attestation Certificate Chain (`x5c`)** |
-| **YubiKey Management** | None | None | **Natively detected by official `ykman 5.9.2`** as `YubiKey 5A (5.4.3)` |
-| **OATH 2FA Authenticator** | None | None | **Yubico Authenticator Applet** with LittleFS flash storage (up to 32 accounts) |
-| **HMAC Challenge-Response**| None | None | **20-byte HMAC-SHA1** for KeePassXC database physical unlock |
-| **Dual OTP Touch Slots** | None | None | **Slot 1** (Short tap password type) & **Slot 2** (Long hold challenge-response) |
-| **Native USB CCID** | None | None | **Class 0x0B SmartCard Descriptor** recognized by Linux `pcscd` & Windows SC |
-| **Web KVM & Automation** | Basic Keystrokes | None | **16-byte UDP Bridge (`esp32_kvm.py`)**, Macro Replayer, Absolute Mouse |
-| **Encrypted Backup** | None | None | **AES-256-GCM Encrypted `.esp32vault` export/import** + Dual NVS backup |
+| Feature Category | Specific Capability | Description |
+| :--- | :--- | :--- |
+| **Passkeys / WebAuthn** | FIDO2 / CTAP 2.1 | Resident credentials (`rk`), user presence (`up`), user verification (`uv`), `credProtect` Level 1–3, and 2048-byte `largeBlobs`. |
+| **Attestation** | X.509 EC P-256 Chain | Genuine DER-encoded X.509 Batch Certificate returned during enterprise registration. |
+| **Yubico Emulation** | Official YubiKey 5A (5.4.3) | Detected natively by `ykman` CLI & GUI; supports ISO 7816 OATH 2FA applet and KeePassXC 20-byte HMAC-SHA1 challenge-response. |
+| **Physical Touch** | BOOT Button Gestures | Short press confirms passkey authentication; 2.5s hold toggles between HID and Security Key modes with auto-reboot. |
+| **BadUSB Scripting** | Ducky Script 2.0 Engine | Full support for `REPEAT`, `BLOCK...ENDBLOCK`, delays, functional keys (`F1`–`F12`), and compound shortcuts. |
+| **Typing Engine** | 4-Parameter Tuning | Custom typing delay, burst size, burst pause, and newline settling delay to prevent dropped keys on slow targets. |
+| **Web KVM Bridge** | 16-byte UDP Protocol | Low-latency mouse, keyboard, and multimedia streaming client (`esp32_kvm.py`) for Linux (Wayland/X11), Windows, and macOS. |
+| **Absolute Mouse** | Coordinate Plane (0..32767) | Resolution-independent cursor positioning immune to OS mouse acceleration and monitor scaling factors. |
+| **Action Macro Engine** | Binary `.krec` Streaming | Live recording and high-speed execution of keyboard/mouse macros directly from hardware flash memory. |
+| **USB Mass Storage** | 2 MB Virtual RAM-Disk | Emulates `DUCKY_DRIVE` (FAT12) with LittleFS flash source of truth, automated host sync, and drag-and-drop OTA updates. |
+| **Encrypted Vault** | Zero-Knowledge AES-256-GCM | Encrypted storage for TOTP seeds and passkeys with 1-click `.esp32vault` backup and dual NVS flash persistence. |
+| **Network & Discovery**| mDNS Responder & Telemetry | Access directly via `http://esp32-hid.local`; displays Home Station IP, direct AP IP, signal strength (RSSI), and gateway. |
+| **OTA Updates** | Web & USB Drag-and-Drop | Flash firmware and filesystem images over Wi-Fi or by copying `firmware.bin` directly onto the USB drive. |
+| **Hardware Spoofing** | Custom USB Descriptors | Spoof Vendor ID, Product ID, Manufacturer Name, and Product Name with presets for Logitech, Microsoft, Apple, etc. |
 
 ---
 
-## Operating Modes
+## 3. The 3 Hardware Operating Modes
 
-The device operates in 3 distinct profiles switchable via the Web Dashboard or by **holding the physical BOOT button (GPIO 0) for 2.5 seconds** (reboots automatically in 500ms):
+The device switches between 3 distinct profiles via the Web Dashboard or by **holding the physical BOOT button (GPIO 0) for 2.5 seconds** (reboots automatically in 500ms):
 
 | Mode | USB Identity (VID:PID) | LED Status | Functionality & Interfaces |
 | :--- | :--- | :---: | :--- |
@@ -51,116 +54,52 @@ The device operates in 3 distinct profiles switchable via the Web Dashboard or b
 
 ---
 
-## FIDO2 & WebAuthn Technical Specifications
-
-The FIDO2 engine implements complete **Client-to-Authenticator Protocol (CTAP 2.0 / 2.1)** and **W3C WebAuthn Level 3**:
+## 4. Hardware & System Architecture
 
 ```text
-USB HID Endpoints (Usage Page: 0xF1D0, Usage: 0x01)
-├── CTAPHID Transport Layer (64-byte framing)
-│   ├── 0x86 CTAPHID_INIT       (Nonce echo, CID assignment, protocol v2)
-│   ├── 0x81 CTAPHID_PING       (Liveness & latency calibration)
-│   ├── 0x88 CTAPHID_WINK       (Visual LED blink identification)
-│   ├── 0x90 CTAPHID_CBOR       (Encapsulated CTAP2 command payload)
-│   ├── 0x83 CTAPHID_MSG        (Legacy U2F fallback & vendor tunneling)
-│   ├── 0x91 CTAPHID_CANCEL     (Asynchronous cancellation)
-│   └── 0xBB CTAPHID_KEEPALIVE  (User presence periodic heartbeat)
-└── CTAP2 Application Layer
-    ├── 0x04 authenticatorGetInfo
-    ├── 0x01 authenticatorMakeCredential (NIST P-256 key generation, packed / x5c attestation)
-    ├── 0x02 authenticatorGetAssertion  (Touch-gated assertion signature)
-    ├── 0x06 authenticatorClientPIN     (PIN Protocol 1: ECDH P-256 + AES-256-CBC + HMAC-SHA256)
-    ├── 0x07 authenticatorReset         (Hardware-gated factory wipe)
-    ├── 0x0A authenticatorCredentialManagement (Enumerate RPs, discoverable credentials, deletion)
-    └── 0x0C authenticatorLargeBlobs    (2048 bytes flash/RAM storage)
+ESP32-S3 Project Structure:
+├── boards/
+│   └── esp32-s3-devkitc-1-n16r8.json    # Board definition (16MB Flash, 8MB OPI PSRAM)
+├── data/                               # LittleFS Web UI Assets & USB Drive
+│   ├── app.html                        # Main console UI
+│   ├── app.js                          # Web client application logic
+│   ├── login.html                      # Single-operator login page
+│   ├── styles.css                      # Modern dark stylesheet
+│   └── usb_drive/                      # Source of truth for USB Mass Storage drive
+│       ├── esp32_kvm.py                # Universal KVM client & macro engine
+│       ├── PAYLOAD.PS1                 # Staged PowerShell payload
+│       ├── README.TXT                  # USB drive documentation
+│       └── RUN.BAT                     # Execution launcher script
+├── server/                             # Standalone Host Utilities (Python)
+│   ├── esp32_kvm.py                    # Universal KVM Client & Macro Engine
+│   └── target_screenshot_server.py     # Lightweight screenshot agent
+├── src/
+│   ├── main.cpp                        # Dual-core firmware source code (FIDO2 + HID + Web)
+│   ├── FidoEngine.cpp                  # CTAP 2.0 / 2.1 protocol implementation
+│   ├── FidoCertificates.cpp            # X.509 EC P-256 Batch Attestation Certificate
+│   ├── YubiKey.cpp                     # Yubico Management, OATH Applet & HMAC-SHA1
+│   └── USBHIDFIDO.cpp                  # CTAPHID USB transport & CCID SmartCard
+├── partitions.csv                      # Partition table (OTA0: 3MB, OTA1: 3MB, LittleFS: 9MB)
+└── platformio.ini                      # PlatformIO configuration
 ```
 
-### X.509 Hardware Attestation Certificate Chain
-The firmware embeds a hardware-signed X.509 EC P-256 Batch Attestation Certificate returned during direct/enterprise registration:
-* **Subject**: `CN=YubiKey 5A Serial 17869661, OU=Authenticator Attestation, O=Yubico AB, C=SE`
-* **Issuer**: `CN=Yubico Root CA, OU=Authenticator Attestation, O=Yubico AB, C=SE`
-* **Serial Number**: `17869661`
-* **Curve & Algorithm**: `NIST P-256 (secp256r1)` with `ECDSA-SHA256`
-* **Validity Period**: `2020-01-01` to `2045-01-01`
-
 ---
 
-## Yubico YubiKey 5A Emulation Architecture
+## 5. Quick Start Guide
 
-### 1. Official YubiKey Manager (`ykman 5.9.2`) CLI Output
+### Step 1: Build and Flash Firmware
+Connect the ESP32-S3 board to your PC via the **native USB port** and run:
+
 ```bash
-$ ykman list
-YubiKey 5A (5.4.3) [OTP+FIDO+CCID] Serial: 17869661
-
-$ ykman info
-Device type: YubiKey 5A
-Serial number: 17869661
-Firmware version: 5.4.3
-Form factor: Keychain (USB-A)
-Enabled USB interfaces: OTP, FIDO, CCID
-
-Applications
-Yubico OTP      Enabled
-FIDO U2F        Enabled
-FIDO2           Enabled
-OATH            Enabled
-PIV             Enabled
-OpenPGP         Enabled
-YubiHSM Auth    Enabled
-
-$ ykman fido info
-PIN:                8 attempt(s) remaining
-Minimum PIN length: 4
-```
-
-### 2. ISO 7816-4 APDU & CCID SmartCard Routing
-* **Management Applet (`A0 00 00 05 27 47 11 17`)**: Responds to `SELECT` and `CTAP_READ_CONFIG` (`0xC2` / `0x42`) with full TLV capabilities descriptors.
-* **OATH Applet (`A0 00 00 05 27 21 01`)**: Implements `SELECT` (Tag `0x79` version, Tag `0x71` salt), `LIST`, `CALCULATE` (Tag `0x75` 20-byte HMAC or Tag `0x76` TOTP), `PUT`, `DELETE`.
-* **KeePassXC HMAC-SHA1 Challenge-Response**: Generates deterministic 20-byte HMAC-SHA1 digests matching genuine Slot 2 responses (INS `0x38`).
-* **Native USB CCID Driver (`Class 0x0B`)**: Dynamic TinyUSB driver with Bulk-IN (`0x82`) and Bulk-OUT (`0x02`) endpoints recognized by `pcscd` smart card daemon.
-
----
-
-## Web KVM & BadUSB Automation Engine
-
-* **Universal KVM Client (`server/esp32_kvm.py`)**:
-  - Single-file standalone Python client under 30 KB.
-  - Native Wayland Linux `evdev` integration, Windows Win32 API, and macOS Quartz.
-  - Low-latency 16-byte UDP protocol (`0xCAFE`) with sequence resync and safety watchdogs.
-* **Hardware Absolute Mouse (`0..32767`)**:
-  - Resolution-independent coordinate mapping. `(0,0)` is always top-left across all monitor scalings and multi-head setups.
-* **Ducky Script 2.0 Engine**:
-  - Supports `REPEAT`, `BLOCK...ENDBLOCK`, delays, functional keys (`F1`..`F12`), multimedia keys, and custom typing profiles.
-
----
-
-## Zero-Knowledge Encrypted Vault & Backup
-
-The Web Dashboard features an encrypted hardware vault protected by **PBKDF2-HMAC-SHA256** (100,000 iterations) and **AES-256-GCM**:
-* **Live 2FA TOTP Generator**: Real-time rotating codes with countdown timers and instant USB keyboard auto-fill.
-* **Zero-Knowledge Encrypted Backup (`.esp32vault`)**: 1-click encrypted export and import of all Passkeys, OATH secrets, and KeePassXC configurations.
-* **Dual NVS Flash Persistence**: Hardware NVS mirroring guarantees passkey survival across LittleFS filesystem reflashing and OTA updates.
-* **BIP-39 24-Word Recovery Phrase**: Deterministic paper seed backup generated via hardware TRNG.
-
----
-
-## Quick Start Guide
-
-### 1. Build and Flash via PlatformIO
-```bash
-# Clone the repository
-git clone https://github.com/danish9661/es32s3-hid.git
-cd es32s3-hid
-
-# Build and flash firmware
+# 1. Build and flash firmware binary
 pio run -t upload
 
-# Flash LittleFS WebUI filesystem
+# 2. Upload Web UI files to LittleFS (required)
 pio run -t uploadfs
 ```
 
-### 2. Access the Web Dashboard
-1. Connect to the ESP32 Wi-Fi AP (`ESP32-HID-Console`, Password: `Password123`) or via Home Wi-Fi STA IP.
+### Step 2: Access the Web Dashboard
+1. Connect to the Wi-Fi AP (`ESP32-HID-Console`, Password: `Password123`) or access via Home Wi-Fi Station IP.
 2. Open your browser to `http://esp32-hid.local` (or `http://192.168.4.1`).
 3. Default credentials:
    - **Username**: `admin`
@@ -168,9 +107,18 @@ pio run -t uploadfs
 
 ---
 
-## Documentation Index
+## 6. Complete Documentation Index
 
+### Hardware Security & Passkeys
 * [**FIDO2 / WebAuthn User Guide**](docs/FIDO2_PASSKEY_USER_GUIDE.md) — Step-by-step passkey registration, Android/Windows Hello pairing, and PIN management.
 * [**FIDO2 & CTAP2 Technical Specification**](docs/FIDO2_PASSKEY_SPECIFICATION.md) — Low-level packet structures, cryptographic primitives, and state machines.
 * [**YubiKey 5A Emulation Guide**](docs/YUBIKEY_EMULATION_GUIDE.md) — `ykman` setup, ISO 7816 OATH applet, KeePassXC sync, and CCID SmartCard details.
+
+### HID Injection & Automation
+* [**Ducky Script 2.0 & Typing Engine Guide**](docs/DUCKY_SCRIPT_GUIDE.md) — Ducky syntax, modifier combinations, and typing engine tuning parameters.
+* [**Web KVM, Macro Replay & Absolute Mouse**](docs/KVM_AND_AUTOMATION_GUIDE.md) — Universal cross-platform client, `.krec` binary macros, and absolute coordinates.
+* [**Virtual USB Storage & Web OTA Updates**](docs/USB_STORAGE_AND_OTA_GUIDE.md) — Virtual FAT12 drive, automatic synchronization, and drag-and-drop firmware flashing.
+
+### Integration & System
+* [**REST API Reference**](docs/REST_API_REFERENCE.md) — Complete endpoint reference for remote scripting, real-time HID injection, and device telemetry.
 * [**Settings & Hardware Reboot Guide**](docs/SETTINGS_REBOOT_GUIDE.md) — Real-time vs reboot configuration reference.
