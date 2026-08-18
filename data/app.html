@@ -33,12 +33,61 @@
 
     <main class="content">
       <section id="view-editor" class="view editor-grid active">
-        <aside class="panel files-box">
-          <div class="files-head">
-            <strong>Scripts</strong>
-            <button id="new-file-btn" class="btn-outline">New</button>
+        <aside class="panel files-box explorer-panel">
+          <div class="explorer-header">
+            <span class="explorer-title">📁 EXPLORER</span>
+            <div style="display:flex; gap:4px;">
+              <button id="new-file-btn" class="btn-outline btn-sm" style="padding:2px 6px;" title="New Script">➕</button>
+              <button id="msc-refresh-btn" class="btn-outline btn-sm" style="padding:2px 6px;" title="Refresh Explorer">🔄</button>
+            </div>
           </div>
-          <div id="files-list" class="files-list"></div>
+
+          <div class="explorer-tree">
+            <!-- Folder 1: Scripts (LittleFS) -->
+            <details class="tree-folder" open>
+              <summary class="tree-folder-header">
+                <span class="tree-arrow">▾</span>
+                <span class="tree-icon">📂</span>
+                <span class="tree-folder-name">Scripts (Flash)</span>
+              </summary>
+              <div id="files-list" class="tree-files-list" style="margin-top:4px;"></div>
+            </details>
+
+            <!-- Folder 2: USB Mass Storage Drive (2 MB Quota) -->
+            <details class="tree-folder" open style="margin-top:14px;">
+              <summary class="tree-folder-header msc-tree-header" style="color:#00f3ff;">
+                <span class="tree-arrow">▾</span>
+                <span class="tree-icon">💾</span>
+                <span class="tree-folder-name">USB Drive (2 MB)</span>
+                <span id="msc-percent-text" class="badge ok" style="font-size:10px; margin-left:auto; padding:1px 5px;">0%</span>
+              </summary>
+              
+              <!-- Quota Meter -->
+              <div class="msc-quota-wrap" style="padding:6px 4px 4px 14px;">
+                <div class="progress-bar-wrap" style="height:4px; background:rgba(255,255,255,0.08); border-radius:2px; overflow:hidden;">
+                  <div id="msc-usage-bar" class="progress-bar-fill" style="width:0%; background:#00f3ff; height:100%; transition:width 0.3s ease;"></div>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--muted); margin-top:2px;">
+                  <span id="msc-usage-text">0 KB / 2,048 KB</span>
+                </div>
+              </div>
+
+              <!-- File List -->
+              <div id="msc-files-list" class="tree-files-list" style="padding-left:14px; margin-top:4px;">
+                <div style="color:var(--muted); font-size:11px;">Loading files...</div>
+              </div>
+
+              <!-- USB Quick Actions -->
+              <div class="msc-tree-actions" style="padding:6px 0 0 14px; display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:4px;">
+                <button type="button" id="msc-rebuild-btn" class="btn-primary btn-sm" style="font-size:10px; padding:3px 4px;" title="Rebuild FAT12 drive from /usb_drive/ files">🔨 Rebuild Drive</button>
+                <button type="button" id="msc-reset-default-btn" class="btn-outline btn-sm" style="font-size:10px; padding:3px 4px;" title="Reset drive to defaults">🗑️ Reset</button>
+              </div>
+              <div style="padding:4px 0 0 14px;">
+                <button type="button" id="stage-selected-script-btn" class="btn-outline btn-sm" style="width:100%; font-size:10px; padding:4px 6px;" title="Deploy open script to PAYLOAD.PS1 on USB drive">⚡ Stage Script to USB</button>
+              </div>
+              <div id="msc-status-line" class="status-line" style="font-size:10px; margin-top:4px; padding-left:14px;"></div>
+            </details>
+          </div>
         </aside>
 
         <section class="panel editor-box">
@@ -58,7 +107,7 @@
               <span id="script-progress-cmd" class="cmd-text"></span>
             </div>
           </div>
-          <textarea id="code-area" spellcheck="false" placeholder="Write Ducky Script here..."></textarea>
+          <textarea id="code-area" class="editor-textarea" spellcheck="false" placeholder="Write Ducky Script here..."></textarea>
           <div id="editor-status" class="status-line">Ready.</div>
         </section>
       </section>
@@ -956,7 +1005,7 @@
               <h4>Virtual USB Drive (MSC) Configuration</h4>
               <span id="usb-msc-status-badge" class="badge">Active</span>
             </div>
-            <p class="small">When enabled, the ESP32 emulates a 2 MB virtual USB flash drive on the target PC for running staged offline payloads (e.g. <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>) and collecting exfiltrated data.</p>
+            <p class="small">When enabled, the ESP32 emulates a 2 MB virtual USB flash drive on the target PC for running staged offline payloads (e.g. <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>, <code>esp32_kvm.py</code>) and collecting exfiltrated data. Dragging <code>firmware.bin</code> into the drive automatically flashes the ESP32!</p>
 
             <div class="settings-grid" style="margin-top:12px;">
               <div>
@@ -969,8 +1018,21 @@
                 <label class="label" for="usb-msc-label">Drive Volume Label (Max 11 Chars)</label>
                 <input class="input" id="usb-msc-label" type="text" placeholder="DUCKY_DRIVE" maxlength="11">
               </div>
+              <div>
+                <label class="label" for="usb-msc-backend">Storage Backend</label>
+                <select class="input" id="usb-msc-backend">
+                  <option value="0" selected>⚡ PSRAM RAM-Disk (Fixed 2 MB - Ultra Fast)</option>
+                  <option value="1">💾 MicroSD Card (SD SPI Interface)</option>
+                </select>
+              </div>
+              <div>
+                <label class="checkbox-row" style="margin-top:8px;">
+                  <input id="usb-msc-autosave" type="checkbox">
+                  <span><strong>Auto-Save to Flash (5s Debounce)</strong></span>
+                </label>
+              </div>
             </div>
-            <p class="small" style="color:var(--muted); margin-top:8px;">Preloaded Files in PSRAM: <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>, <code>README.TXT</code>. (Requires Save Settings & Reboot to apply).</p>
+            <p class="small" style="color:var(--muted); margin-top:8px;">Preloaded Files in Drive: <code>RUN.BAT</code>, <code>PAYLOAD.PS1</code>, <code>README.TXT</code>, <code>SYSTEM.LOG</code>. Dragging <code>firmware.bin</code> or web files onto the drive automatically flashes and updates the device.</p>
           </div>
 
           <div class="network-info-card" style="margin-top:16px;">

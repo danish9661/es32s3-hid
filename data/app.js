@@ -808,6 +808,153 @@ async function loadFile(name) {
   }
 }
 
+async function loadMscFiles() {
+  const list = qs("msc-files-list");
+  if (!list) return;
+  try {
+    const res = await api("/api/usb_drive/files");
+    if (!res.ok) {
+      list.innerHTML = '<div style="color:var(--danger); font-size:11px;">USB Drive unavailable</div>';
+      return;
+    }
+    const data = await res.json();
+    const usedBytes = data.used_bytes || 0;
+    const totalBytes = data.total_bytes || (2 * 1024 * 1024);
+    const usedKb = (usedBytes / 1024).toFixed(0);
+    const totalKb = (totalBytes / 1024).toFixed(0);
+    const pct = Math.min(100, Math.round((usedBytes / totalBytes) * 100));
+
+    const usageBar = qs("msc-usage-bar");
+    if (usageBar) usageBar.style.width = `${pct}%`;
+    setText("msc-usage-text", `${usedKb} KB / ${totalKb} KB`);
+    setText("msc-percent-text", `${pct}%`);
+
+    list.innerHTML = "";
+    if (!data.files || !data.files.length) {
+      list.innerHTML = '<div style="color:var(--muted); font-size:11px;">No files on USB drive.</div>';
+      return;
+    }
+
+    data.files.forEach((f) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex; justify-content:space-between; align-items:center; padding:4px 6px; background:rgba(255,255,255,0.03); border-radius:4px; transition:background 0.12s;";
+      
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = f.name;
+      nameSpan.title = `Click to load ${f.name} in editor (${f.size} bytes)`;
+      nameSpan.style.cssText = "overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:115px; cursor:pointer; color:#00f3ff;";
+      nameSpan.addEventListener("click", async () => {
+        try {
+          setText("editor-status", `Loading ${f.name} from USB Drive...`);
+          const r = await api(`/api/usb_drive/read?name=${encodeURIComponent(f.name)}`);
+          if (r.ok) {
+            const txt = await r.text();
+            currentFile = f.name;
+            qs("code-area").value = txt;
+            setText("current-file", `USB: ${f.name}`);
+            setText("editor-status", `Loaded ${f.name} from USB drive.`);
+          }
+        } catch (_) {
+          setText("editor-status", `Failed to load ${f.name}`);
+        }
+      });
+
+      const rightDiv = document.createElement("div");
+      rightDiv.style.cssText = "display:flex; align-items:center; gap:6px;";
+
+      const sizeSpan = document.createElement("span");
+      sizeSpan.style.cssText = "color:var(--muted); font-size:10px;";
+      sizeSpan.textContent = f.size > 1024 ? `${(f.size / 1024).toFixed(1)}K` : `${f.size}B`;
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "btn-danger btn-sm";
+      delBtn.style.cssText = "padding:1px 4px; font-size:10px; line-height:1;";
+      delBtn.textContent = "✕";
+      delBtn.title = `Delete ${f.name} from USB Drive`;
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteUsbDriveFile(f.name);
+      });
+
+      rightDiv.appendChild(sizeSpan);
+      rightDiv.appendChild(delBtn);
+      row.appendChild(nameSpan);
+      row.appendChild(rightDiv);
+      list.appendChild(row);
+    });
+  } catch (_) {
+    list.innerHTML = '<div style="color:var(--muted); font-size:11px;">Error loading drive files</div>';
+  }
+}
+
+async function stageCurrentScriptToMsc() {
+  if (!currentFile) {
+    alert("Please select or save a script in the editor first.");
+    return;
+  }
+  setText("msc-status-line", `Staging ${currentFile}...`);
+  try {
+    const res = await api(`/api/usb_drive/stage_script?name=${encodeURIComponent(currentFile)}`, { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      setText("msc-status-line", `✅ Staged to PAYLOAD.PS1`);
+      loadMscFiles();
+    } else {
+      setText("msc-status-line", `❌ ${data.error || "Failed to stage"}`);
+    }
+  } catch (_) {
+    setText("msc-status-line", "❌ Network error");
+  }
+}
+
+async function rebuildUsbDrive() {
+  setText("msc-status-line", "Rebuilding FAT12 drive...");
+  try {
+    const res = await api("/api/usb_drive/rebuild", { method: "POST" });
+    const data = await res.json();
+    setText("msc-status-line", data.ok ? "✅ Drive rebuilt" : `⚠️ ${data.message || "Not active"}`);
+    if (data.ok) loadMscFiles();
+  } catch (_) {
+    setText("msc-status-line", "❌ Network error");
+  }
+}
+
+async function resetMscDefault() {
+  if (!confirm("Reset USB Drive to factory default files? All custom files will be deleted.")) return;
+  setText("msc-status-line", "Resetting USB Drive...");
+  try {
+    const res = await api("/api/usb_drive/reset", { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      setText("msc-status-line", "✅ USB Drive reset to default");
+      loadMscFiles();
+    } else {
+      setText("msc-status-line", `❌ ${data.error || "Failed to reset"}`);
+    }
+  } catch (_) {
+    setText("msc-status-line", "❌ Network error");
+  }
+}
+
+async function deleteUsbDriveFile(name) {
+  if (!confirm(`Delete '${name}' from USB Drive?`)) return;
+  try {
+    const res = await api(`/api/usb_drive/delete?name=${encodeURIComponent(name)}`, { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      setText("msc-status-line", `Deleted ${name}`);
+      loadMscFiles();
+    } else {
+      alert(data.error || "Failed to delete file from USB drive");
+    }
+  } catch (_) {
+    alert("Network error while deleting file");
+  }
+}
+
+
+
+
 function askNewFilename() {
   const name = prompt("New script name (example: demo.txt)", "demo.txt");
   if (!name) return "";
@@ -2845,6 +2992,8 @@ async function loadSettings() {
       }
     }
     if (qs("usb-msc-label")) qs("usb-msc-label").value = d.usb_msc_label || "DUCKY_DRIVE";
+    if (qs("usb-msc-backend")) qs("usb-msc-backend").value = String(d.usb_msc_backend ?? 0);
+    if (qs("usb-msc-autosave")) qs("usb-msc-autosave").checked = d.usb_msc_autosave ?? false;
 
     const bleFidoCheck = qs("ble-fido-enabled");
     const bleFidoBadge = qs("ble-fido-status-badge");
@@ -2930,6 +3079,8 @@ async function saveSettings() {
     usb_pid: usbPid,
     usb_msc_enabled: qs("usb-msc-enabled") ? qs("usb-msc-enabled").checked : true,
     usb_msc_label: qs("usb-msc-label") ? qs("usb-msc-label").value.trim() : "DUCKY_DRIVE",
+    usb_msc_backend: qs("usb-msc-backend") ? Number(qs("usb-msc-backend").value) : 0,
+    usb_msc_autosave: qs("usb-msc-autosave") ? qs("usb-msc-autosave").checked : false,
     ble_fido_enabled: qs("ble-fido-enabled") ? qs("ble-fido-enabled").checked : false,
 
     kvm_enabled: qs("kvm-enabled").checked,
@@ -4309,17 +4460,22 @@ function initEvents() {
       window.open("http://" + ip, "_blank");
     }
   });
-  qs("net-copy-ap-ip").addEventListener("click", () => {
+  qs("net-copy-ap-ip")?.addEventListener("click", () => {
     const ip = qs("net-ap-ip").textContent;
     if (ip) copyTextToClipboard("http://" + ip, "AP IP link copied.");
   });
-  qs("net-open-mdns").addEventListener("click", () => {
-    const host = qs("net-mdns").textContent;
-    if (host) window.open(host, "_blank");
+
+  qs("net-open-mdns")?.addEventListener("click", () => {
+    window.open("http://ducky.local", "_blank");
   });
 
   bindVaultEvents();
   updateKvmHelperPanel();
+
+  qs("msc-refresh-btn")?.addEventListener("click", loadMscFiles);
+  qs("msc-rebuild-btn")?.addEventListener("click", rebuildUsbDrive);
+  qs("msc-reset-default-btn")?.addEventListener("click", resetMscDefault);
+  qs("stage-selected-script-btn")?.addEventListener("click", stageCurrentScriptToMsc);
 }
 
 async function bootstrap() {
@@ -4344,6 +4500,7 @@ async function bootstrap() {
   applyKeyboardPrefsToUI();
 
   await loadFiles();
+  await loadMscFiles();
   await refreshStatus();
   await loadKvmStatus();
   await loadActionFiles();

@@ -340,8 +340,10 @@ select.input {
 
 /* Editor View */
 .editor-grid {
-  grid-template-columns: 260px 1fr;
-  gap: 14px;
+  grid-template-columns: 280px 1fr;
+  gap: 16px;
+  min-height: calc(100vh - 120px);
+  align-items: stretch;
 }
 
 .files-box,
@@ -362,15 +364,63 @@ select.input {
   margin-bottom: 12px;
 }
 
+.explorer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.tree-folder {
+  margin-bottom: 6px;
+}
+
+.tree-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 600;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  user-select: none;
+  list-style: none;
+}
+
+.tree-folder-header::-webkit-details-marker {
+  display: none;
+}
+
+.tree-folder-header:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tree-arrow {
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.tree-folder:not([open]) summary .tree-arrow {
+  transform: rotate(-90deg);
+}
+
+.tree-files-list,
 .files-list {
   display: grid;
-  gap: 6px;
-  max-height: calc(100vh - 250px);
+  gap: 4px;
+  max-height: calc(100vh - 300px);
   overflow-y: auto;
 }
 
 .file-item {
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: rgba(10, 14, 19, 0.6);
@@ -378,7 +428,7 @@ select.input {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 0.88rem;
+  font-size: 0.82rem;
   transition: all 0.12s ease;
 }
 
@@ -413,10 +463,22 @@ select.input {
   flex-wrap: wrap;
 }
 
+.editor-box {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: calc(100vh - 130px);
+}
+
+#code-area,
 .editor-textarea {
-  min-height: 480px;
-  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-  font-size: 13px;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 520px;
+  margin-top: 10px;
+  padding: 14px 16px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace;
+  font-size: 14px;
   line-height: 1.6;
   resize: vertical;
   background: #080c10;
@@ -424,6 +486,14 @@ select.input {
   color: #e6edf3;
   border-radius: var(--radius-sm);
   tab-size: 2;
+  box-sizing: border-box;
+}
+
+#code-area:focus,
+.editor-textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(0, 243, 255, 0.15);
 }
 
 .status-line {

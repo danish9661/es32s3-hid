@@ -114,7 +114,9 @@ static String sysLogs[MAX_LOG_LINES];
 static size_t sysLogHead = 0;
 static size_t sysLogCount = 0;
 
-void updateMscLogFile();
+// updateMscLogFile removed — SYSTEM.LOG now lives in /usb_drive/SYSTEM.LOG on LittleFS
+void setStatus(uint8_t r, uint8_t g, uint8_t b);
+String scriptPathFromName(const String &name);
 
 void logSystem(const String &msg) {
   unsigned long now = millis();
@@ -142,7 +144,11 @@ void logSystem(const String &msg) {
     }
   }
 
-  updateMscLogFile();
+  // Append to /usb_drive/SYSTEM.LOG if USB drive folder exists
+  if (LittleFS.exists("/usb_drive/SYSTEM.LOG")) {
+    File logf = LittleFS.open("/usb_drive/SYSTEM.LOG", "a");
+    if (logf) { logf.println(line); logf.close(); }
+  }
 }
 
 #ifndef STATUS_LED_PIN
@@ -242,6 +248,18 @@ bool bleFidoEnabled = false;
 constexpr size_t MSC_SECTOR_SIZE = 512;
 constexpr size_t MSC_SECTOR_COUNT = 4096; // 2 MB
 constexpr size_t MSC_DISK_SIZE = MSC_SECTOR_COUNT * MSC_SECTOR_SIZE;
+
+bool usbMscAutoSave = false;
+uint8_t usbMscBackend = 0; // 0 = PSRAM RAM-Disk (2 MB), 1 = MicroSD Card
+int8_t sdCsPin = 10;
+int8_t sdMosiPin = 11;
+int8_t sdMisoPin = 13;
+int8_t sdSckPin = 12;
+bool sdCardMounted = false;
+uint64_t sdCardSectorCount = 0;
+
+volatile bool mscDirty = false;
+volatile uint32_t mscLastWriteMs = 0;
 
 #define HID_REPORT_ID_ABSMOUSE 7
 
@@ -550,6 +568,8 @@ static int32_t onMscWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32
   uint32_t dstOffset = (lba * MSC_SECTOR_SIZE) + offset;
   if (dstOffset + bufsize > MSC_DISK_SIZE) return -1;
   memcpy(mscDiskBuffer + dstOffset, buffer, bufsize);
+  mscDirty = true;
+  mscLastWriteMs = millis();
   return bufsize;
 }
 
@@ -557,27 +577,192 @@ static bool onMscStartStop(uint8_t power_condition, bool start, bool load_eject)
   return true;
 }
 
-void initVirtualFatDisk() {
+// --- FAT12 LOW-LEVEL HELPERS ---
+void setFat12ClusterEntry(uint8_t *fat, uint16_t cluster, uint16_t value) {
+  int fatOffset = (cluster * 3) / 2;
+  if (cluster % 2 == 0) {
+    fat[fatOffset] = static_cast<uint8_t>(value & 0xFF);
+    fat[fatOffset + 1] = (fat[fatOffset + 1] & 0xF0) | static_cast<uint8_t>((value >> 8) & 0x0F);
+  } else {
+    fat[fatOffset] = (fat[fatOffset] & 0x0F) | static_cast<uint8_t>((value & 0x0F) << 4);
+    fat[fatOffset + 1] = static_cast<uint8_t>((value >> 4) & 0xFF);
+  }
+}
+
+uint16_t getFat12ClusterEntry(const uint8_t *fat, uint16_t cluster) {
+  int fatOffset = (cluster * 3) / 2;
+  if (cluster % 2 == 0) {
+    return static_cast<uint16_t>(fat[fatOffset] | ((fat[fatOffset + 1] & 0x0F) << 8));
+  } else {
+    return static_cast<uint16_t>(((fat[fatOffset] & 0xF0) >> 4) | (fat[fatOffset + 1] << 4));
+  }
+}
+
+// Write a file entry into FAT12 RAM-disk at dirIndex slot, starting at startCluster
+void addFat12FileEntry(int dirIndex, const char *name83, const uint8_t *content, size_t len, uint16_t startCluster) {
+  if (!mscDiskBuffer || dirIndex < 0 || dirIndex >= 128) return;
+
+  uint8_t *fat1 = mscDiskBuffer + (1 * 512);
+  uint8_t *fat2 = mscDiskBuffer + (13 * 512);
+  uint8_t *rootDir = mscDiskBuffer + (25 * 512);
+
+  uint8_t *entry = rootDir + (dirIndex * 32);
+  memset(entry, 0x20, 11);
+  size_t nlen = strlen(name83);
+  if (nlen > 11) nlen = 11;
+  memcpy(entry, name83, nlen);
+
+  entry[11] = 0x20; // Archive attribute
+  entry[22] = 0x00; entry[23] = 0x50; // 10:00 AM
+  entry[24] = 0x2F; entry[25] = 0x5D; // 2026-08-18
+  entry[26] = static_cast<uint8_t>(startCluster & 0xFF);
+  entry[27] = static_cast<uint8_t>((startCluster >> 8) & 0xFF);
+  uint32_t sizeBytes = static_cast<uint32_t>(len);
+  memcpy(entry + 28, &sizeBytes, 4);
+
+  uint32_t clustersNeeded = (len + 511) / 512;
+  if (clustersNeeded == 0) clustersNeeded = 1;
+
+  for (uint32_t i = 0; i < clustersNeeded; i++) {
+    uint16_t currCluster = startCluster + i;
+    uint16_t nextVal = (i + 1 < clustersNeeded) ? (currCluster + 1) : 0x0FFF;
+    setFat12ClusterEntry(fat1, currCluster, nextVal);
+    setFat12ClusterEntry(fat2, currCluster, nextVal);
+
+    uint32_t sector = 33 + (currCluster - 2);
+    if (sector < MSC_SECTOR_COUNT) {
+      size_t chunk = (i * 512 < len) ? min(static_cast<size_t>(512), len - (i * 512)) : 0;
+      if (chunk > 0 && content != nullptr) {
+        memcpy(mscDiskBuffer + (sector * 512), content + (i * 512), chunk);
+      }
+    }
+  }
+}
+
+String formatFat83Name(const uint8_t *rawName) {
+  String name = "";
+  for (int i = 0; i < 8; i++) {
+    if (rawName[i] != 0x20 && rawName[i] != 0x00) {
+      name += static_cast<char>(rawName[i]);
+    }
+  }
+  String ext = "";
+  for (int i = 8; i < 11; i++) {
+    if (rawName[i] != 0x20 && rawName[i] != 0x00) {
+      ext += static_cast<char>(rawName[i]);
+    }
+  }
+  if (!ext.isEmpty()) {
+    name += "." + ext;
+  }
+  return name;
+}
+
+// Format an 8.3 name string (e.g. "PAYLOAD.PS1") into an 11-byte FAT83 padded field
+void formatTo83(const String &filename, char out[12]) {
+  memset(out, ' ', 11);
+  out[11] = '\0';
+  int dotPos = filename.lastIndexOf('.');
+  String base = (dotPos >= 0) ? filename.substring(0, dotPos) : filename;
+  String ext  = (dotPos >= 0) ? filename.substring(dotPos + 1) : "";
+  base.toUpperCase(); ext.toUpperCase();
+  for (int i = 0; i < 8 && i < (int)base.length(); i++) out[i] = base[i];
+  for (int i = 0; i < 3 && i < (int)ext.length();  i++) out[8+i] = ext[i];
+}
+
+// --- /usb_drive/ SOURCE OF TRUTH ON LITTLEFS ---
+
+#define USB_DRIVE_DIR  "/usb_drive"
+#define USB_DRIVE_MAX  (2 * 1024 * 1024) // Hard 2 MB quota on /usb_drive/
+
+// Ensure /usb_drive/ exists with default files
+void ensureUsbDriveDir() {
+  if (!LittleFS.exists(USB_DRIVE_DIR)) {
+    LittleFS.mkdir(USB_DRIVE_DIR);
+  }
+
+  // Migrate esp32_kvm.py from root to /usb_drive/ if present
+  if (LittleFS.exists("/esp32_kvm.py")) {
+    if (!LittleFS.exists("/usb_drive/esp32_kvm.py")) {
+      File src = LittleFS.open("/esp32_kvm.py", "r");
+      if (src) {
+        File dst = LittleFS.open("/usb_drive/esp32_kvm.py", "w");
+        if (dst) {
+          uint8_t copyBuf[512];
+          while (src.available()) {
+            size_t bytes = src.read(copyBuf, sizeof(copyBuf));
+            dst.write(copyBuf, bytes);
+          }
+          dst.close();
+        }
+        src.close();
+      }
+    }
+    LittleFS.remove("/esp32_kvm.py");
+  }
+
+  auto writeDefault = [](const char *path, const char *content) {
+    if (!LittleFS.exists(path)) {
+      File f = LittleFS.open(path, "w");
+      if (f) { f.print(content); f.close(); }
+    }
+  };
+
+  writeDefault("/usb_drive/RUN.BAT",
+    "@echo off\r\n"
+    "echo Executing Staged Payload...\r\n"
+    "powershell -ExecutionPolicy Bypass -File PAYLOAD.PS1\r\n"
+    "pause\r\n");
+
+  writeDefault("/usb_drive/PAYLOAD.PS1",
+    "# ESP32-S3 HID Staged Payload\r\n"
+    "Write-Host \"[+] Running Staged Payload from ESP32-S3 MSC Drive\" -ForegroundColor Green\r\n"
+    "Get-Date | Out-File -Append exfil.txt\r\n");
+
+  writeDefault("/usb_drive/README.TXT",
+    "ESP32-S3 HID Console - USB Drive (2 MB)\r\n"
+    "Place PAYLOAD.PS1 here or drop firmware.bin to OTA update.\r\n");
+
+  writeDefault("/usb_drive/SYSTEM.LOG",
+    "=== ESP32-S3 System Log ===\r\n");
+}
+
+// Calculate total bytes used in /usb_drive/
+size_t getUsbDriveUsedBytes() {
+  size_t total = 0;
+  File dir = LittleFS.open(USB_DRIVE_DIR);
+  if (!dir || !dir.isDirectory()) return 0;
+  File f = dir.openNextFile();
+  while (f) {
+    if (!f.isDirectory()) total += f.size();
+    f = dir.openNextFile();
+  }
+  return total;
+}
+
+// Build FAT12 RAM-disk in mscDiskBuffer from /usb_drive/ files on LittleFS
+void buildFat12FromLittleFS() {
   if (!mscDiskBuffer) return;
   memset(mscDiskBuffer, 0, MSC_DISK_SIZE);
 
+  // Boot Sector
   uint8_t *bs = mscDiskBuffer;
   bs[0] = 0xEB; bs[1] = 0x3C; bs[2] = 0x90;
   memcpy(bs + 3, "MSWIN4.1", 8);
   bs[11] = 0x00; bs[12] = 0x02; // 512 bytes/sector
-  bs[13] = 0x01;               // 1 sector/cluster
+  bs[13] = 0x01;                 // 1 sector/cluster
   bs[14] = 0x01; bs[15] = 0x00; // 1 reserved sector
-  bs[16] = 0x02;               // 2 FATs
-  bs[17] = 0x80; bs[18] = 0x00; // 128 root entries (8 sectors)
+  bs[16] = 0x02;                 // 2 FATs
+  bs[17] = 0x80; bs[18] = 0x00; // 128 root entries
   bs[19] = 0x00; bs[20] = 0x10; // 4096 sectors (2 MB)
-  bs[21] = 0xF8;               // Media descriptor
-  bs[22] = 0x0C; bs[23] = 0x00; // 12 sectors/FAT
-  bs[24] = 0x20; bs[25] = 0x00; // 32 sectors/track
-  bs[26] = 0x40; bs[27] = 0x00; // 64 heads
-  bs[28] = 0x00; bs[29] = 0x00; bs[30] = 0x00; bs[31] = 0x00;
+  bs[21] = 0xF8;                 // Media: fixed disk
+  bs[22] = 0x0C; bs[23] = 0x00; // FAT size 12 sectors
+  bs[24] = 0x3F; bs[25] = 0x00; // 63 sectors/track
+  bs[26] = 0xFF; bs[27] = 0x00; // 255 heads
+  bs[28] = 0; bs[29] = 0; bs[30] = 0; bs[31] = 0;
   bs[36] = 0x80;
   bs[38] = 0x29;
-  bs[39] = 0x75; bs[40] = 0x10; bs[41] = 0x96; bs[42] = 0x61;
+  memcpy(bs + 39, "ESPK", 4);   // Volume ID
   memcpy(bs + 43, "DUCKY_DRIVE", 11);
   memcpy(bs + 54, "FAT12   ", 8);
   bs[510] = 0x55; bs[511] = 0xAA;
@@ -587,68 +772,251 @@ void initVirtualFatDisk() {
   fat1[0] = 0xF8; fat1[1] = 0xFF; fat1[2] = 0xFF;
   fat2[0] = 0xF8; fat2[1] = 0xFF; fat2[2] = 0xFF;
 
+  // Volume label in root dir
   uint8_t *rootDir = mscDiskBuffer + (25 * 512);
   memcpy(rootDir + 0, "DUCKY_DRIVE", 11);
   rootDir[11] = 0x08;
 
-  auto addFat12File = [&](int dirIndex, const char *name83, const char *content, uint16_t cluster) {
-    uint8_t *entry = rootDir + (dirIndex * 32);
-    memcpy(entry, name83, 11);
-    entry[11] = 0x20;
-    entry[22] = 0x00; entry[23] = 0x50;
-    entry[24] = 0x2F; entry[25] = 0x5D;
-    entry[26] = static_cast<uint8_t>(cluster & 0xFF);
-    entry[27] = static_cast<uint8_t>((cluster >> 8) & 0xFF);
-    uint32_t len = strlen(content);
-    memcpy(entry + 28, &len, 4);
+  // Now add each file from /usb_drive/
+  File dir = LittleFS.open(USB_DRIVE_DIR);
+  if (!dir || !dir.isDirectory()) return;
 
-    int fatOffset = (cluster * 3) / 2;
-    if (cluster % 2 == 0) {
-      fat1[fatOffset] = 0xFF;
-      fat1[fatOffset + 1] = (fat1[fatOffset + 1] & 0xF0) | 0x0F;
-      fat2[fatOffset] = 0xFF;
-      fat2[fatOffset + 1] = (fat2[fatOffset + 1] & 0xF0) | 0x0F;
+  int dirSlot = 1; // slot 0 is volume label
+  uint16_t cluster = 2;
+
+  File f = dir.openNextFile();
+  while (f && dirSlot < 128 && cluster < 4080) {
+    if (!f.isDirectory()) {
+      String fname = String(f.name());
+      // Strip leading path if present
+      int sl = fname.lastIndexOf('/');
+      if (sl >= 0) fname = fname.substring(sl + 1);
+
+      size_t fsize = f.size();
+      if (fsize > USB_DRIVE_MAX) fsize = USB_DRIVE_MAX;
+
+      // Read file content
+      std::vector<uint8_t> buf(fsize);
+      if (fsize > 0) f.read(buf.data(), fsize);
+      f.close();
+
+      // Format 8.3 name
+      char name83[12];
+      formatTo83(fname, name83);
+
+      addFat12FileEntry(dirSlot, name83, buf.data(), fsize, cluster);
+
+      uint32_t clustersUsed = (fsize + 511) / 512;
+      if (clustersUsed == 0) clustersUsed = 1;
+      cluster += clustersUsed;
+      dirSlot++;
     } else {
-      fat1[fatOffset] = (fat1[fatOffset] & 0x0F) | 0xF0;
-      fat1[fatOffset + 1] = 0xFF;
-      fat2[fatOffset] = (fat2[fatOffset] & 0x0F) | 0xF0;
-      fat2[fatOffset + 1] = 0xFF;
+      f.close();
     }
-
-    uint32_t dataSector = 33 + (cluster - 2);
-    memcpy(mscDiskBuffer + (dataSector * 512), content, len);
-  };
-
-  const char *runBat = "@echo off\r\necho Executing Staged Payload...\r\npowershell -ExecutionPolicy Bypass -File payload.ps1\r\npause\r\n";
-  const char *payloadPs1 = "# ESP32-S3 HID Staged Payload\r\nWrite-Host \"[+] Running Staged Payload from ESP32-S3 MSC Drive\" -ForegroundColor Green\r\nGet-Date | Out-File -Append exfil.txt\r\n";
-  const char *readmeTxt = "ESP32-S3 HID Console - Virtual Mass Storage Drive\r\nUse this drive to store staged payloads or collect exfiltrated data.\r\n";
-  const char *logInit = "=== ESP32-S3 System Log ===\r\n";
-
-  addFat12File(1, "RUN     BAT", runBat, 2);
-  addFat12File(2, "PAYLOAD PS1", payloadPs1, 3);
-  addFat12File(3, "README  TXT", readmeTxt, 4);
-  addFat12File(4, "SYSTEM  LOG", logInit, 5);
+    f = dir.openNextFile();
+  }
+  logSystem("[MSC] Built FAT12 disk from /usb_drive/ (" + String(dirSlot - 1) + " files, cluster=" + String(cluster) + ")");
 }
 
-void updateMscLogFile() {
+// Sync a PC drag-drop write back from FAT12 PSRAM → /usb_drive/ on LittleFS
+void syncFat12WriteToLittleFS() {
   if (!mscDiskBuffer) return;
   uint8_t *rootDir = mscDiskBuffer + (25 * 512);
-  uint8_t *entry = rootDir + (4 * 32); // 4th file directory entry
-  
-  String logsDump = "";
-  size_t start = (sysLogCount < MAX_LOG_LINES) ? 0 : sysLogHead;
-  for (size_t i = 0; i < sysLogCount; i++) {
-    size_t idx = (start + i) % MAX_LOG_LINES;
-    logsDump += sysLogs[idx] + "\r\n";
+
+  for (int i = 0; i < 128; i++) {
+    uint8_t *entry = rootDir + (i * 32);
+    if (entry[0] == 0x00 || entry[0] == 0xE5) continue;
+    if (entry[11] == 0x0F || (entry[11] & 0x08)) continue; // skip LFN / volume label
+
+    String fname = formatFat83Name(entry);
+    if (fname.isEmpty()) continue;
+
+    // Skip known OTA files — handled by checkUsbDriveAutoUpdate()
+    String fu = fname; fu.toUpperCase();
+    if (fu == "FIRMWARE.BIN" || fu == "UPDATE.BIN") continue;
+
+    uint32_t fsize = 0;
+    memcpy(&fsize, entry + 28, 4);
+    uint16_t startCluster = static_cast<uint16_t>(entry[26] | (entry[27] << 8));
+
+    if (fsize == 0 || startCluster < 2) continue;
+    if (fsize > USB_DRIVE_MAX) fsize = USB_DRIVE_MAX;
+
+    uint32_t sector = 33 + (startCluster - 2);
+    if (sector >= MSC_SECTOR_COUNT) continue;
+    uint8_t *dataPtr = mscDiskBuffer + (sector * 512);
+
+    String path = String(USB_DRIVE_DIR) + "/" + fname;
+    File outFile = LittleFS.open(path, "w");
+    if (outFile) {
+      outFile.write(dataPtr, min(static_cast<size_t>(fsize), static_cast<size_t>((MSC_SECTOR_COUNT - sector) * 512)));
+      outFile.close();
+      logSystem("[MSC] Synced USB write → " + path + " (" + String(fsize) + " bytes)");
+    }
   }
-  
-  uint32_t len = logsDump.length();
-  if (len > 512 * 8) len = 512 * 8; // Cap at 4 KB on FAT12 cluster 5
-  memcpy(entry + 28, &len, 4); // update length in directory
-  
-  uint32_t dataSector = 33 + (5 - 2); // cluster 5 sector
-  memcpy(mscDiskBuffer + (dataSector * 512), logsDump.c_str(), len);
+  mscDirty = false;
 }
+
+// Check for firmware/web OTA files dropped onto USB drive by PC
+void checkUsbDriveAutoUpdate() {
+  if (!mscDiskBuffer) return;
+  uint8_t *rootDir = mscDiskBuffer + (25 * 512);
+
+  for (int i = 0; i < 128; i++) {
+    uint8_t *entry = rootDir + (i * 32);
+    if (entry[0] == 0x00) break;
+    if (entry[0] == 0xE5 || (entry[11] & 0x08)) continue;
+
+    String fname = formatFat83Name(entry);
+    fname.toUpperCase();
+
+    // 1. Firmware OTA
+    if (fname == "FIRMWARE.BIN" || fname == "UPDATE.BIN") {
+      uint32_t fsize = 0;
+      memcpy(&fsize, entry + 28, 4);
+      uint16_t cluster = static_cast<uint16_t>(entry[26] | (entry[27] << 8));
+
+      if (fsize > 100000 && fsize <= 2097152 && cluster >= 2) {
+        uint32_t dataSector = 33 + (cluster - 2);
+        uint8_t *dataPtr = mscDiskBuffer + (dataSector * 512);
+
+        if (dataPtr[0] == 0xE9) {
+          logSystem("[OTA] Found " + fname + " on USB Drive (" + String(fsize) + " bytes). Flashing...");
+          setStatus(255, 0, 255);
+          if (Update.begin(fsize, U_FLASH)) {
+            if (Update.write(dataPtr, fsize) == fsize) {
+              if (Update.end(true)) {
+                logSystem("[OTA] Firmware updated from USB Drive! Rebooting...");
+                entry[0] = 0xE5;
+                delay(500);
+                ESP.restart();
+                return;
+              }
+            }
+          }
+          logSystem("[OTA] USB Firmware Flash failed: " + String(Update.errorString()));
+        }
+      }
+    }
+    // 2. Web UI Assets OTA
+    else if (fname == "APP.HTM" || fname == "APP.HTML" || fname == "APP.JS" || fname == "STYLES.CSS") {
+      uint32_t fsize = 0;
+      memcpy(&fsize, entry + 28, 4);
+      uint16_t cluster = static_cast<uint16_t>(entry[26] | (entry[27] << 8));
+
+      if (fsize > 0 && fsize < 500000 && cluster >= 2) {
+        uint32_t dataSector = 33 + (cluster - 2);
+        uint8_t *dataPtr = mscDiskBuffer + (dataSector * 512);
+
+        String targetPath = "/app.html";
+        if (fname.indexOf("JS") >= 0) targetPath = "/app.js";
+        else if (fname.indexOf("CSS") >= 0) targetPath = "/styles.css";
+
+        File f = LittleFS.open(targetPath, "w");
+        if (f) {
+          f.write(dataPtr, fsize);
+          f.close();
+          logSystem("[OTA] Updated Web UI asset: " + targetPath + " (" + String(fsize) + " bytes)");
+          entry[0] = 0xE5;
+        }
+      }
+    }
+  }
+}
+
+// --- REST API HELPERS FOR /usb_drive/ ---
+
+String getUsbDriveFileListJson() {
+  DynamicJsonDocument doc(8192);
+  size_t usedBytes = getUsbDriveUsedBytes();
+  doc["total_bytes"] = USB_DRIVE_MAX;
+  doc["used_bytes"]  = usedBytes;
+  doc["free_bytes"]  = (usedBytes < USB_DRIVE_MAX) ? (USB_DRIVE_MAX - usedBytes) : 0;
+  doc["msc_active"]  = (mscDiskBuffer != nullptr);
+
+  JsonArray files = doc.createNestedArray("files");
+  File dir = LittleFS.open(USB_DRIVE_DIR);
+  if (dir && dir.isDirectory()) {
+    File f = dir.openNextFile();
+    while (f) {
+      if (!f.isDirectory()) {
+        String fname = String(f.name());
+        int sl = fname.lastIndexOf('/');
+        if (sl >= 0) fname = fname.substring(sl + 1);
+        JsonObject obj = files.createNestedObject();
+        obj["name"] = fname;
+        obj["size"] = f.size();
+      }
+      f = dir.openNextFile();
+    }
+  }
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// Save a file to /usb_drive/ with 2 MB quota enforcement
+bool saveUsbDriveFile(const String &filename, const uint8_t *data, size_t len) {
+  if (len > USB_DRIVE_MAX) return false; // Single file cannot exceed 2 MB
+  size_t used = getUsbDriveUsedBytes();
+  String path = String(USB_DRIVE_DIR) + "/" + filename;
+  // Subtract existing file size from quota if it exists
+  if (LittleFS.exists(path)) {
+    File existing = LittleFS.open(path, "r");
+    if (existing) { used -= existing.size(); existing.close(); }
+  }
+  if (used + len > USB_DRIVE_MAX) return false; // Quota exceeded
+  File f = LittleFS.open(path, "w");
+  if (!f) return false;
+  f.write(data, len);
+  f.close();
+  // Rebuild FAT12 PSRAM disk so USB host sees new file
+  if (mscDiskBuffer) buildFat12FromLittleFS();
+  return true;
+}
+
+bool deleteUsbDriveFile(const String &filename) {
+  String path = String(USB_DRIVE_DIR) + "/" + filename;
+  if (!LittleFS.exists(path)) return false;
+  bool ok = LittleFS.remove(path);
+  if (ok && mscDiskBuffer) buildFat12FromLittleFS();
+  return ok;
+}
+
+bool stageScriptToUsbDrive(const String &scriptName) {
+  String srcPath = scriptPathFromName(scriptName);
+  if (!LittleFS.exists(srcPath)) return false;
+  File src = LittleFS.open(srcPath, "r");
+  if (!src) return false;
+  size_t len = src.size();
+  if (len > USB_DRIVE_MAX) { src.close(); return false; }
+  std::vector<uint8_t> buf(len);
+  src.read(buf.data(), len);
+  src.close();
+  return saveUsbDriveFile("PAYLOAD.PS1", buf.data(), len);
+}
+
+void resetUsbDrive() {
+  // Remove all files in /usb_drive/
+  File dir = LittleFS.open(USB_DRIVE_DIR);
+  if (dir && dir.isDirectory()) {
+    File f = dir.openNextFile();
+    while (f) {
+      String p = String(f.name());
+      f.close();
+      LittleFS.remove(p);
+      f = dir.openNextFile();
+    }
+  }
+  // Re-create defaults (force by temporarily removing dir check)
+  ensureUsbDriveDir();
+  // Rebuild FAT12
+  if (mscDiskBuffer) buildFat12FromLittleFS();
+}
+
+
+
+
 
 void mouseMoveAbsolute(float xPct, float yPct, uint8_t clickButton = 0, uint8_t clickAction = 0) {
   xPct = clampInt(static_cast<int>(xPct * 10.0f), 0, 1000) / 10.0f;
@@ -1600,6 +1968,8 @@ void persistSettings() {
   out["usb_product_name"] = usbProductName;
   out["usb_msc_enabled"] = usbMscEnabled;
   out["usb_msc_label"] = usbMscVolumeLabel;
+  out["usb_msc_autosave"] = usbMscAutoSave;
+  out["usb_msc_backend"] = usbMscBackend;
   out["fido_mode"] = fidoSecurityKeyMode;
   out["ble_fido_enabled"] = bleFidoEnabled;
 
@@ -1637,6 +2007,8 @@ void persistSettings() {
     prefs.putString("usb_pn", usbProductName);
     prefs.putBool("usb_msc", usbMscEnabled);
     prefs.putString("usb_lbl", usbMscVolumeLabel);
+    prefs.putBool("msc_asave", usbMscAutoSave);
+    prefs.putUChar("msc_back", usbMscBackend);
     prefs.putBool("fido_mode", fidoSecurityKeyMode);
     prefs.putBool("ble_fido", bleFidoEnabled);
     prefs.putInt("delay", typeDelay);
@@ -1675,6 +2047,8 @@ bool loadSettingsNVS() {
   usbProductName = prefs.getString("usb_pn", usbProductName);
   usbMscEnabled = prefs.getBool("usb_msc", usbMscEnabled);
   usbMscVolumeLabel = prefs.getString("usb_lbl", usbMscVolumeLabel);
+  usbMscAutoSave = prefs.getBool("msc_asave", usbMscAutoSave);
+  usbMscBackend = prefs.getUChar("msc_back", usbMscBackend);
   fidoSecurityKeyMode = prefs.getBool("fido_mode", fidoSecurityKeyMode);
   bleFidoEnabled = prefs.getBool("ble_fido", bleFidoEnabled);
   typeDelay = prefs.getInt("delay", typeDelay);
@@ -1725,6 +2099,8 @@ void loadSettings() {
         if (doc.containsKey("usb_product_name")) usbProductName = doc["usb_product_name"].as<String>();
         if (doc.containsKey("usb_msc_enabled")) usbMscEnabled = doc["usb_msc_enabled"].as<bool>();
         if (doc.containsKey("usb_msc_label")) usbMscVolumeLabel = doc["usb_msc_label"].as<String>();
+        if (doc.containsKey("usb_msc_autosave")) usbMscAutoSave = doc["usb_msc_autosave"].as<bool>();
+        if (doc.containsKey("usb_msc_backend")) usbMscBackend = doc["usb_msc_backend"].as<uint8_t>();
         if (doc.containsKey("ble_fido_enabled")) bleFidoEnabled = doc["ble_fido_enabled"].as<bool>();
         if (doc.containsKey("fido_mode")) {
           fidoSecurityKeyMode = doc["fido_mode"].as<bool>();
@@ -1866,6 +2242,12 @@ bool applySettingsJson(const String &jsonBody, bool &usbIdentityChanged, bool &w
     String lbl = doc["usb_msc_label"].as<String>();
     lbl.trim();
     if (!lbl.isEmpty() && lbl.length() <= 11) usbMscVolumeLabel = lbl;
+  }
+  if (doc.containsKey("usb_msc_autosave")) {
+    usbMscAutoSave = doc["usb_msc_autosave"].as<bool>();
+  }
+  if (doc.containsKey("usb_msc_backend")) {
+    usbMscBackend = doc["usb_msc_backend"].as<uint8_t>();
   }
 
   bool oldBleFido = bleFidoEnabled;
@@ -4417,7 +4799,11 @@ void registerRoutes() {
     if (LittleFS.exists("/system.log.old")) {
       LittleFS.remove("/system.log.old");
     }
-    updateMscLogFile();
+    // Clear /usb_drive/SYSTEM.LOG on log wipe
+    if (LittleFS.exists("/usb_drive/SYSTEM.LOG")) {
+      File logf = LittleFS.open("/usb_drive/SYSTEM.LOG", "w");
+      if (logf) { logf.println("=== ESP32-S3 System Log ==="); logf.close(); }
+    }
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -5449,16 +5835,71 @@ void registerRoutes() {
     request->send(200, "application/json", out);
   });
 
-  server.on("/api/bip39/validate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (!requireAuth(request)) return;
-      DynamicJsonDocument doc(512);
-      deserializeJson(doc, data, len);
-      String mnemonic = doc["mnemonic"] | "";
-      bool valid = Bip39::validateMnemonic(mnemonic);
-      request->send(200, "application/json", valid ? "{\"ok\":true,\"valid\":true}" : "{\"ok\":true,\"valid\":false,\"error\":\"Invalid 24-word checksum or unrecognized word\"}");
+  // --- USB DRIVE ROUTES (LittleFS /usb_drive/) ---
+  server.on("/api/usb_drive/files", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    request->send(200, "application/json", getUsbDriveFileListJson());
+  });
+
+  server.on("/api/usb_drive/read", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    String name = "";
+    if (request->hasParam("name")) name = request->getParam("name")->value();
+    if (name.isEmpty()) { request->send(400, "text/plain", "Missing name"); return; }
+    String path = String(USB_DRIVE_DIR) + "/" + name;
+    if (!LittleFS.exists(path)) { request->send(404, "text/plain", "File not found"); return; }
+    File f = LittleFS.open(path, "r");
+    if (!f) { request->send(500, "text/plain", "Cannot open file"); return; }
+    String content = f.readString();
+    f.close();
+    request->send(200, "text/plain", content);
+  });
+
+  server.on("/api/usb_drive/delete", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    String name = "";
+    if (request->hasParam("name")) name = request->getParam("name")->value();
+    if (name.isEmpty()) { request->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing name\"}"); return; }
+    bool ok = deleteUsbDriveFile(name);
+    if (ok) {
+      logSystem("[USB] Deleted /usb_drive/" + name);
+      request->send(200, "application/json", "{\"ok\":true}");
+    } else {
+      request->send(404, "application/json", "{\"ok\":false,\"error\":\"File not found\"}");
     }
-  );
+  });
+
+  server.on("/api/usb_drive/stage_script", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    String name = "";
+    if (request->hasParam("name")) name = request->getParam("name")->value();
+    if (name.isEmpty()) { request->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing name\"}"); return; }
+    bool ok = stageScriptToUsbDrive(name);
+    if (ok) {
+      logSystem("[USB] Staged script '" + name + "' → /usb_drive/PAYLOAD.PS1");
+      request->send(200, "application/json", "{\"ok\":true,\"message\":\"Script staged to USB Drive\"}");
+    } else {
+      request->send(404, "application/json", "{\"ok\":false,\"error\":\"Script not found or quota exceeded\"}");
+    }
+  });
+
+  server.on("/api/usb_drive/rebuild", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    if (mscDiskBuffer) {
+      buildFat12FromLittleFS();
+      logSystem("[USB] Rebuilt FAT12 disk from /usb_drive/");
+      request->send(200, "application/json", "{\"ok\":true,\"message\":\"Drive rebuilt\"}");
+    } else {
+      request->send(200, "application/json", "{\"ok\":false,\"message\":\"USB drive not active (disabled or Passkey mode)\"}");
+    }
+  });
+
+  server.on("/api/usb_drive/reset", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    resetUsbDrive();
+    logSystem("[USB] Reset /usb_drive/ to factory defaults");
+    request->send(200, "application/json", "{\"ok\":true,\"message\":\"Reset to factory defaults\"}");
+  });
 }
 
 void setup() {
@@ -5499,8 +5940,13 @@ void setup() {
     psramBuffer = static_cast<char *>(malloc(64 * 1024));
   }
 
+  // Always ensure /usb_drive/ folder exists with defaults (no PSRAM needed)
+  ensureUsbDriveDir();
+  // Clean up legacy msc_disk.bin if it exists
+  if (LittleFS.exists("/msc_disk.bin")) LittleFS.remove("/msc_disk.bin");
+
   if (fidoSecurityKeyMode) {
-    // Dedicated FIDO2 Hardware Security Key Profile
+    // Dedicated FIDO2 Hardware Security Key Profile — NO MSC, NO mscDiskBuffer
     FIDO.begin(true);
     USB.VID(0x10C4);
     USB.PID(0x8A2A);
@@ -5521,10 +5967,11 @@ void setup() {
     if(AbsMouse) AbsMouse->begin();
     if(Consumer) Consumer->begin();
     FIDO.begin(false);
-    if (psramFound()) {
+    if (usbMscEnabled && psramFound()) {
+      // Only allocate 2 MB PSRAM for MSC when USB drive is actually enabled
       mscDiskBuffer = static_cast<uint8_t *>(heap_caps_malloc(MSC_DISK_SIZE, MALLOC_CAP_SPIRAM));
-      if (mscDiskBuffer && usbMscEnabled) {
-        initVirtualFatDisk();
+      if (mscDiskBuffer) {
+        buildFat12FromLittleFS(); // Build FAT12 disk from /usb_drive/ files
         MSC.vendorID(usbVendorName.c_str());
         MSC.productID(usbMscVolumeLabel.c_str());
         MSC.productRevision("1.0");
@@ -5666,6 +6113,7 @@ void checkPhysical2faTrigger() {
 void loop() {
   static uint32_t lastPrune = 0;
   static uint32_t lastKvmBindRefresh = 0;
+  static uint32_t lastMscUpdateCheck = 0;
 
   checkPhysical2faTrigger();
 
@@ -5682,6 +6130,17 @@ void loop() {
   if (now - lastKvmBindRefresh > 5000) {
     updateKvmUdpBinding();
     lastKvmBindRefresh = now;
+  }
+
+  // Sync PC drag-drop writes back to /usb_drive/ after 5s debounce
+  if (mscDirty && (now - mscLastWriteMs > 5000)) {
+    syncFat12WriteToLittleFS();
+  }
+
+  // Check for drag-and-drop firmware/UI updates in USB drive
+  if (mscDirty && (now - lastMscUpdateCheck > 2000)) {
+    lastMscUpdateCheck = now;
+    checkUsbDriveAutoUpdate();
   }
 
   vTaskDelay(pdMS_TO_TICKS(25));

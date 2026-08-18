@@ -97,12 +97,16 @@ graph TD
 ESP32-S3 Project Structure:
 ├── boards/
 │   └── esp32-s3-devkitc-1-n16r8.json    # Board definition (16MB Flash, 8MB OPI PSRAM)
-├── data/                               # LittleFS Web UI Assets
+├── data/                               # LittleFS Web UI Assets & USB Drive
 │   ├── app.html                        # Main single-page console UI
 │   ├── app.js                          # Web client application logic
-│   ├── esp32_kvm.py                    # Universal single-file cross-platform KVM client
 │   ├── login.html                      # Single-operator login page
-│   └── styles.css                      # Modern dark theme stylesheet
+│   ├── styles.css                      # Modern dark theme stylesheet
+│   └── usb_drive/                      # Source of truth for USB Mass Storage drive
+│       ├── esp32_kvm.py                # Universal single-file KVM client & macro engine
+│       ├── PAYLOAD.PS1                 # Staged PowerShell payload
+│       ├── README.TXT                  # USB drive documentation
+│       └── RUN.BAT                     # Execution launcher script
 ├── server/                             # Standalone Host Utilities (Python)
 │   ├── esp32_kvm.py                    # Universal KVM Client & Macro Engine
 │   └── target_screenshot_server.py     # Lightweight screenshot agent
@@ -380,6 +384,14 @@ curl -X POST -F "file=@.pio/build/esp32-s3-n16r8/littlefs.bin" \
 - `POST /api/action_file/save?name=macro.txt`: Save recording to `/actions`.
 - `DELETE /api/action_file/delete?name=macro.txt`: Delete action file.
 
+### USB Mass Storage & Drive Management
+- `GET /api/usb_drive/files`: List files, total space (2 MB quota), and used bytes from `/usb_drive`.
+- `GET /api/usb_drive/read?name=PAYLOAD.PS1`: Read file content from `/usb_drive/`.
+- `POST /api/usb_drive/stage_script?name=script.txt`: Deploy selected script directly to `/usb_drive/PAYLOAD.PS1`.
+- `POST /api/usb_drive/rebuild`: Dynamically regenerate the FAT12 PSRAM RAM-disk from `/usb_drive/` files.
+- `POST /api/usb_drive/delete?name=file.txt`: Delete a file from `/usb_drive/`.
+- `POST /api/usb_drive/reset`: Reset `/usb_drive/` to factory default payload files.
+
 ### Settings & Device Management
 - `GET /api/get_settings`: Retrieve all device settings, network telemetry, and WiFi status.
 - `POST /api/save_settings`: Save updated device parameters.
@@ -397,6 +409,42 @@ For internet or remote network access:
 4. Configure your proxy to send:
    - `X-Proxy-Token: <your-token>`
    - `X-Forwarded-Proto: https`
+
+---
+
+## Virtual USB Mass Storage (LittleFS `/usb_drive/` Source of Truth) & USB OTA
+
+The ESP32-S3 emulates a **2 MB virtual USB flash drive (`DUCKY_DRIVE`)** on the target computer with zero unnecessary flash wear.
+
+```mermaid
+flowchart TD
+    A["Target PC connects to DUCKY_DRIVE (2 MB FAT12)"] --> B["View & Run Staged Payloads:<br>RUN.BAT, PAYLOAD.PS1, esp32_kvm.py, README.TXT"]
+    A --> C["Drop firmware.bin into DUCKY_DRIVE"]
+    C --> D["ESP32 detects flash magic 0xE9"]
+    D --> E["Internal OTA writes to app flash partition"]
+    E --> F["Device reboots with new firmware!"]
+```
+
+### Architecture & Key Features:
+1. **LittleFS `/usb_drive/` Source of Truth**:
+   - Files are stored as real files inside the `/usb_drive/` directory on the 9 MB LittleFS flash partition.
+   - Survives power cycles naturally through LittleFS journaling without raw sector dump overhead (`/msc_disk.bin` eliminated).
+   - **Zero Boot Flash Penalty**: In Passkey/FIDO2 mode or when MSC is disabled, zero PSRAM is allocated and no disk loading occurs on boot.
+
+2. **Web UI Explorer Integration**:
+   - The **"USB Drive (2 MB)"** folder in the web editor displays real-time quota usage and allows loading/editing files directly in the browser.
+   - **⚡ Stage Script to USB**: Instantly stages the currently open editor script to `PAYLOAD.PS1` on the USB drive.
+   - **🔨 Rebuild Drive**: Dynamically refreshes the active PSRAM FAT12 disk structure from `/usb_drive/` so plugged-in computers see changes immediately without re-plugging.
+   - **🗑️ Reset**: Restores factory default files (`RUN.BAT`, `PAYLOAD.PS1`, `README.TXT`, `SYSTEM.LOG`, `esp32_kvm.py`).
+
+3. **Drag-and-Drop USB Firmware Updates & Auto-Sync**:
+   - Copy `firmware.bin` directly into `DUCKY_DRIVE` from Windows Explorer, macOS Finder, or Linux file managers to trigger automatic OTA flashing and reboot.
+   - Any regular files dropped by the target PC onto the drive automatically sync back into LittleFS `/usb_drive/` after a debounce delay.
+
+4. **Included Tools on Drive**:
+   - **`esp32_kvm.py`**: Universal Python client for remote KVM control, absolute/relative mouse, and macro playback.
+   - **`RUN.BAT`**: Quick launcher for Windows execution.
+   - **`PAYLOAD.PS1`**: Staged PowerShell payload template.
 
 ---
 
