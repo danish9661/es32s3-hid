@@ -6,181 +6,192 @@
   <meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
-  <meta name="description" content="Documentation for ESP32-S3 USB HID, FIDO2 CTAP2 Passkeys, YubiKey 5A Emulation, BadUSB, and Web KVM.">
+  <meta name="description" content="Technical documentation for ESP32-S3 USB HID, FIDO2 CTAP2 Passkeys, YubiKey 5A Emulation, BadUSB, and Web KVM.">
 
-  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <!-- Official Docsify Dark Theme Base -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4/lib/themes/dark.css">
+  
+  <!-- Inter & JetBrains Mono Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
   <style>
+    /* Professional Developer Theme Overrides */
     :root {
-      --bg-primary: #0a0e17;
-      --bg-secondary: #111827;
-      --bg-card: #161f30;
-      --bg-sidebar: #0d131f;
-      --border-color: rgba(255, 255, 255, 0.08);
-      --border-focus: #3b82f6;
-      --text-primary: #f3f4f6;
-      --text-secondary: #9ca3af;
-      --text-muted: #6b7280;
-      --accent-blue: #3b82f6;
-      --accent-cyan: #06b6d4;
-      --accent-purple: #8b5cf6;
-      --accent-green: #10b981;
-      --code-bg: #0f172a;
-      --sidebar-width: 290px;
+      --theme-color: #3b82f6;
+      --text-color-base: #cbd5e1;
+      --sidebar-width: 270px;
     }
-
-    * { box-sizing: border-box; }
 
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background-color: var(--bg-primary);
-      color: var(--text-primary);
-      margin: 0;
-      padding: 0;
-      line-height: 1.65;
-      -webkit-font-smoothing: antialiased;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+      background-color: #0b0f19 !important;
+      color: #cbd5e1 !important;
+      font-size: 15px !important;
+      line-height: 1.6 !important;
     }
 
-    /* Sidebar Styling */
+    /* Fixed Clean Sidebar */
     .sidebar {
-      background-color: var(--bg-sidebar) !important;
-      border-right: 1px solid var(--border-color) !important;
+      background-color: #080c14 !important;
+      border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
       width: var(--sidebar-width) !important;
-      padding: 24px 0 !important;
+      color: #94a3b8 !important;
+      padding: 20px 0 !important;
     }
 
-    .sidebar .app-name-link {
+    .sidebar > h1 {
+      margin: 0 0 16px 0 !important;
+      padding: 0 20px 14px 20px !important;
+      font-size: 1rem !important;
       font-weight: 700 !important;
-      font-size: 1.05rem !important;
-      color: #ffffff !important;
-      letter-spacing: -0.01em;
-      padding: 0 20px 16px 20px !important;
-      display: block;
-      border-bottom: 1px solid var(--border-color);
-      margin-bottom: 16px;
-      text-decoration: none;
+      letter-spacing: -0.01em !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    }
+
+    .sidebar > h1 a {
+      color: #f8fafc !important;
+      text-decoration: none !important;
     }
 
     .sidebar ul {
-      padding: 0 12px !important;
       margin: 0 !important;
+      padding: 0 10px !important;
     }
 
     .sidebar ul li {
-      margin: 3px 0 !important;
+      margin: 2px 0 !important;
+      font-size: 0.88rem !important;
     }
 
     .sidebar ul li a {
-      color: var(--text-secondary) !important;
-      font-size: 0.88rem !important;
+      color: #94a3b8 !important;
       font-weight: 500 !important;
-      padding: 8px 12px !important;
-      border-radius: 6px !important;
-      transition: all 0.15s ease-in-out !important;
       text-decoration: none !important;
-      display: block;
+      padding: 6px 12px !important;
+      border-radius: 6px !important;
+      display: block !important;
+      transition: all 0.15s ease !important;
     }
 
     .sidebar ul li a:hover {
-      color: #ffffff !important;
+      color: #f8fafc !important;
       background-color: rgba(255, 255, 255, 0.05) !important;
+      text-decoration: none !important;
     }
 
     .sidebar ul li.active > a {
-      color: #ffffff !important;
-      background-color: rgba(59, 130, 246, 0.15) !important;
+      color: #60a5fa !important;
+      background-color: rgba(59, 130, 246, 0.12) !important;
       font-weight: 600 !important;
-      border-left: 3px solid var(--accent-blue) !important;
+      border-left: 2px solid #3b82f6 !important;
     }
 
     .sidebar ul li strong {
-      color: var(--text-muted) !important;
+      color: #64748b !important;
       font-size: 0.72rem !important;
       text-transform: uppercase !important;
       letter-spacing: 0.08em !important;
-      padding: 16px 12px 6px 12px !important;
-      display: block;
+      padding: 14px 12px 4px 12px !important;
+      display: block !important;
       font-weight: 700 !important;
     }
 
-    /* Content Area */
+    /* Main Content Container & Balanced Headings */
     .content {
-      padding-top: 20px !important;
-      max-width: 900px !important;
+      padding-top: 0 !important;
+      top: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      left: var(--sidebar-width) !important;
+      position: absolute !important;
     }
 
     .markdown-section {
-      max-width: 900px !important;
+      max-width: 860px !important;
       padding: 30px 45px 80px 45px !important;
+      margin: 0 auto !important;
     }
 
+    /* Proper Balanced Heading Hierarchy (Preventing Giant H1) */
     .markdown-section h1 {
-      font-size: 2.1rem;
-      font-weight: 700;
-      color: #ffffff;
-      letter-spacing: -0.025em;
-      margin-top: 0;
-      margin-bottom: 1rem;
-      padding-bottom: 0.75rem;
-      border-bottom: 1px solid var(--border-color);
+      font-size: 1.65rem !important;
+      font-weight: 700 !important;
+      color: #f8fafc !important;
+      letter-spacing: -0.02em !important;
+      margin-top: 0 !important;
+      margin-bottom: 1rem !important;
+      padding-bottom: 0.6rem !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+      line-height: 1.25 !important;
     }
 
     .markdown-section h2 {
-      font-size: 1.45rem;
-      font-weight: 600;
-      color: #f9fafb;
-      letter-spacing: -0.02em;
-      margin-top: 2.2rem;
-      margin-bottom: 0.85rem;
-      padding-bottom: 0.4rem;
-      border-bottom: 1px solid var(--border-color);
+      font-size: 1.3rem !important;
+      font-weight: 600 !important;
+      color: #f1f5f9 !important;
+      letter-spacing: -0.015em !important;
+      margin-top: 2rem !important;
+      margin-bottom: 0.75rem !important;
+      padding-bottom: 0.4rem !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
     }
 
     .markdown-section h3 {
-      font-size: 1.15rem;
-      font-weight: 600;
-      color: #e5e7eb;
-      margin-top: 1.6rem;
-      margin-bottom: 0.5rem;
+      font-size: 1.05rem !important;
+      font-weight: 600 !important;
+      color: #e2e8f0 !important;
+      margin-top: 1.5rem !important;
+      margin-bottom: 0.5rem !important;
+    }
+
+    .markdown-section h4 {
+      font-size: 0.95rem !important;
+      font-weight: 600 !important;
+      color: #cbd5e1 !important;
     }
 
     .markdown-section p, .markdown-section li {
-      color: #d1d5db;
-      font-size: 0.95rem;
-      line-height: 1.7;
+      color: #cbd5e1 !important;
+      font-size: 0.92rem !important;
+      line-height: 1.65 !important;
     }
 
     .markdown-section a {
-      color: var(--accent-blue);
-      text-decoration: none;
-      font-weight: 500;
+      color: #60a5fa !important;
+      text-decoration: none !important;
+      font-weight: 500 !important;
     }
 
     .markdown-section a:hover {
-      text-decoration: underline;
+      text-decoration: underline !important;
     }
 
-    /* Code Blocks */
+    .markdown-section hr {
+      border: none !important;
+      border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+      margin: 1.8rem 0 !important;
+    }
+
+    /* Modern Code Blocks */
     .markdown-section code {
       font-family: 'JetBrains Mono', monospace !important;
-      font-size: 0.85em !important;
-      background-color: var(--code-bg) !important;
+      font-size: 0.84em !important;
+      background-color: #1e293b !important;
       color: #38bdf8 !important;
-      padding: 3px 6px !important;
+      padding: 2px 6px !important;
       border-radius: 4px !important;
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.06) !important;
     }
 
     .markdown-section pre {
-      background-color: var(--code-bg) !important;
-      border: 1px solid var(--border-color) !important;
+      background-color: #0f172a !important;
+      border: 1px solid rgba(255, 255, 255, 0.08) !important;
       border-radius: 8px !important;
-      padding: 16px 20px !important;
-      overflow-x: auto;
-      margin: 1.2rem 0;
+      padding: 14px 18px !important;
+      overflow-x: auto !important;
+      margin: 1rem 0 !important;
     }
 
     .markdown-section pre > code {
@@ -188,107 +199,81 @@
       color: #e2e8f0 !important;
       padding: 0 !important;
       border: none !important;
-      font-size: 0.88em !important;
-      line-height: 1.55;
+      font-size: 0.85em !important;
+      line-height: 1.5 !important;
     }
 
-    /* Tables */
+    /* Structured Tables */
     .markdown-section table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 1.4rem 0;
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      overflow: hidden;
-      font-size: 0.88rem;
+      width: 100% !important;
+      border-collapse: collapse !important;
+      margin: 1.2rem 0 !important;
+      border: 1px solid rgba(255, 255, 255, 0.08) !important;
+      border-radius: 6px !important;
+      overflow: hidden !important;
+      font-size: 0.85rem !important;
     }
 
     .markdown-section th {
-      background-color: var(--bg-card);
-      color: #ffffff;
-      font-weight: 600;
-      text-align: left;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border-color);
+      background-color: #1e293b !important;
+      color: #f8fafc !important;
+      font-weight: 600 !important;
+      padding: 9px 12px !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+      border-right: 1px solid rgba(255, 255, 255, 0.04) !important;
     }
 
     .markdown-section td {
-      padding: 10px 14px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-      color: #d1d5db;
+      padding: 9px 12px !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
+      border-right: 1px solid rgba(255, 255, 255, 0.04) !important;
+      color: #cbd5e1 !important;
     }
 
     .markdown-section tr:nth-child(even) {
-      background-color: rgba(255, 255, 255, 0.015);
+      background-color: rgba(255, 255, 255, 0.02) !important;
     }
 
-    .markdown-section tr:hover {
-      background-color: rgba(255, 255, 255, 0.03);
-    }
-
-    /* Blockquotes */
-    .markdown-section blockquote {
-      border-left: 3px solid var(--accent-blue);
-      background: rgba(59, 130, 246, 0.06);
-      margin: 1.2rem 0;
-      padding: 12px 18px;
-      border-radius: 0 6px 6px 0;
-      color: #cbd5e1;
-    }
-
-    .markdown-section blockquote p {
-      margin: 0;
-      color: #cbd5e1;
-    }
-
-    /* Search Input */
+    /* Clean Search */
     .search {
-      padding: 0 16px 16px 16px !important;
-      border-bottom: 1px solid var(--border-color);
-      margin-bottom: 12px;
+      padding: 0 16px 14px 16px !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+      margin-bottom: 10px !important;
     }
 
     .search input {
       background: rgba(255, 255, 255, 0.05) !important;
-      border: 1px solid var(--border-color) !important;
+      border: 1px solid rgba(255, 255, 255, 0.1) !important;
       border-radius: 6px !important;
       color: #ffffff !important;
-      font-size: 0.85rem !important;
-      padding: 8px 12px !important;
+      font-size: 0.83rem !important;
+      padding: 7px 10px !important;
       width: 100% !important;
-      outline: none;
-      transition: all 0.15s ease;
+      outline: none !important;
     }
 
     .search input:focus {
-      border-color: var(--accent-blue) !important;
+      border-color: #3b82f6 !important;
       background: rgba(255, 255, 255, 0.08) !important;
     }
 
-    .search .matching-post {
-      border-bottom: 1px solid var(--border-color) !important;
-    }
-
-    /* GitHub Corner / Clean Toggle */
     .github-corner svg {
-      fill: #1f2937 !important;
-      color: #9ca3af !important;
+      fill: #1e293b !important;
+      color: #94a3b8 !important;
     }
 
-    /* Docsify Pagination */
-    .docsify-pagination-container {
-      border-top: 1px solid var(--border-color) !important;
-      padding: 24px 0 !important;
-      margin-top: 40px !important;
-    }
-
-    .pagination-item-title {
-      color: var(--accent-blue) !important;
-      font-weight: 600 !important;
-    }
-
-    .pagination-item-subtitle {
-      color: var(--text-muted) !important;
+    /* Mobile Responsive */
+    @media (max-width: 768px) {
+      .content {
+        left: 0 !important;
+        position: relative !important;
+      }
+      .markdown-section {
+        padding: 20px 18px 60px 18px !important;
+      }
+      .markdown-section h1 {
+        font-size: 1.4rem !important;
+      }
     }
   </style>
 </head>
@@ -299,14 +284,14 @@
       name: 'ESP32-S3 Security Hub',
       repo: 'https://github.com/danish9661/es32s3-hid',
       loadSidebar: true,
-      subMaxLevel: 3,
+      subMaxLevel: 2,
       auto2top: true,
       search: {
         maxAge: 86400000,
         paths: 'auto',
-        placeholder: 'Search documentation...',
+        placeholder: 'Search docs...',
         noData: 'No results found',
-        depth: 4
+        depth: 3
       },
       copyCode: {
         buttonText: 'Copy',
