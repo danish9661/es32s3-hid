@@ -124,8 +124,9 @@ void USBHIDFIDO::processIncomingPacket(const uint8_t *pkt, uint16_t pktLen) {
                  (static_cast<uint32_t>(pkt[2]) << 8)  |
                  (static_cast<uint32_t>(pkt[3]));
   uint8_t cmdOrSeq = pkt[4];
+  bool isInitPacket = ((cmdOrSeq & 0x80) != 0) || (currentRxCmd == 0 && (cmdOrSeq == 0x40 || cmdOrSeq == 0x42 || cmdOrSeq == 0x43));
 
-  if ((cmdOrSeq & 0x80) != 0) {
+  if (isInitPacket) {
     // Initialization Packet
     currentRxCid = cid;
     currentRxCmd = cmdOrSeq;
@@ -245,9 +246,20 @@ void USBHIDFIDO::processCompleteMessage(uint32_t cid, uint8_t cmd, const uint8_t
       cancelPending();
       break;
     default:
-      if (cmd >= 0xC0) { // CTAPHID Vendor Commands (Yubico Management 0xC0, OATH 0xC1, OTP 0xC2)
-        std::vector<uint8_t> apduResp = YubiKey.processApdu(data, len);
-        sendCtapPacket(cid, cmd, apduResp.data(), apduResp.size());
+      if (cmd == 0x42 || cmd == 0x43 || cmd == 0x40 || cmd >= 0xC0) {
+        // CTAPHID Vendor Commands (Yubico Management 0x42 / 0xC2, OATH 0xC1, OTP 0xC0)
+        if (cmd == 0x42 || cmd == 0xC2) { // CTAP_READ_CONFIG (ykman / YubiKit Management)
+          uint8_t getInfoApdu[] = {0x00, 0x1D, 0x00, 0x00, 0x00};
+          std::vector<uint8_t> apduResp = YubiKey.processApdu(getInfoApdu, sizeof(getInfoApdu));
+          // Strip trailing 0x90 0x00 status for raw config payload
+          if (apduResp.size() >= 2 && apduResp[apduResp.size() - 2] == 0x90) {
+            apduResp.resize(apduResp.size() - 2);
+          }
+          sendCtapPacket(cid, cmd, apduResp.data(), apduResp.size());
+        } else {
+          std::vector<uint8_t> apduResp = YubiKey.processApdu(data, len);
+          sendCtapPacket(cid, cmd, apduResp.data(), apduResp.size());
+        }
       } else {
         sendCtapError(cid, 0x01); // CTAP1_ERR_INVALID_CMD
       }
@@ -271,9 +283,9 @@ void USBHIDFIDO::handleInit(uint32_t cid, const uint8_t *data, size_t len) {
   resp[10] = (assignedCid >> 8)  & 0xFF;
   resp[11] = assignedCid & 0xFF;
   resp[12] = 2; // CTAPHID Protocol Version 2
-  resp[13] = 2; // Device Version Major
-  resp[14] = 0; // Device Version Minor
-  resp[15] = 0; // Device Build
+  resp[13] = 5; // Device Version Major 5 (YubiKey 5 Series)
+  resp[14] = 4; // Device Version Minor 4
+  resp[15] = 3; // Device Build 3
   resp[16] = CAPFLAG_WINK | CAPFLAG_CBOR | CAPFLAG_NMSG;
 
   sendCtapPacket(cid, CTAPHID_INIT, resp, sizeof(resp));
@@ -301,22 +313,29 @@ void USBHIDFIDO::handleCbor(uint32_t cid, const uint8_t *data, size_t len) {
 }
 
 void USBHIDFIDO::handleMsg(uint32_t cid, const uint8_t *data, size_t len) {
-  if (len < 4) {
+  if (len < 1) {
     sendCtapError(cid, 0x03);
     return;
   }
-  uint8_t ins = data[1];
-  if (ins == 0x00) { // U2F_VERSION
+  uint8_t ins = (len >= 2) ? data[1] : 0xFF;
+  if (ins == 0x00 && len >= 4) { // U2F_VERSION
     const char *ver = "U2F_V2";
     uint8_t resp[8];
     memcpy(resp, ver, 6);
     resp[6] = 0x90; // SW_NO_ERROR
     resp[7] = 0x00;
     sendCtapPacket(cid, CTAPHID_MSG, resp, 8);
+  } else if (data[0] == 0x42 || (len >= 2 && data[1] == 0x42)) { // CTAP_READ_CONFIG
+    uint8_t getInfoApdu[] = {0x00, 0x1D, 0x00, 0x00, 0x00};
+    std::vector<uint8_t> apduResp = YubiKey.processApdu(getInfoApdu, sizeof(getInfoApdu));
+    if (apduResp.size() >= 2 && apduResp[apduResp.size() - 2] == 0x90) {
+      apduResp.resize(apduResp.size() - 2);
+    }
+    sendCtapPacket(cid, CTAPHID_MSG, apduResp.data(), apduResp.size());
   } else {
-    // Return standard ISO 7816-4 SW_INS_NOT_SUPPORTED (0x6D00)
-    uint8_t sw[2] = { 0x6D, 0x00 };
-    sendCtapPacket(cid, CTAPHID_MSG, sw, sizeof(sw));
+    // Route APDU (like Select, Calculate, Info) through YubiKey APDU engine
+    std::vector<uint8_t> apduResp = YubiKey.processApdu(data, len);
+    sendCtapPacket(cid, CTAPHID_MSG, apduResp.data(), apduResp.size());
   }
 }
 

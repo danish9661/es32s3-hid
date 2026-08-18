@@ -79,6 +79,9 @@ public:
   String calculateTotp(const YubiOathAccount &acc, uint32_t currentEpoch);
   void clearAllOathAccounts();
 
+  // HMAC-SHA1 Challenge-Response
+  bool calculateHmacSha1(int slot, const uint8_t *challenge, size_t len, uint8_t *out20);
+
   // YubiKey APDU & CCID SmartCard Protocol Engine
   std::vector<uint8_t> processApdu(const uint8_t *apdu, size_t len);
   std::vector<uint8_t> processCcidMessage(const uint8_t *msg, size_t len);

@@ -27,6 +27,7 @@
 #include "KeePassXC.h"
 #include "Bip39.h"
 #include "YubiKey.h"
+#include "YubiKeyCCID.h"
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
 #include <cstring>
@@ -6073,7 +6074,8 @@ void setup() {
   if (fidoSecurityKeyMode) {
     // Dedicated FIDO2 / YubiKey Hardware Security Key Profile — NO MSC, NO mscDiskBuffer
     if (YubiKey.isYubiKeyMode()) {
-      // YubiKey 5 Mode: Dedicated Yubico FIDO2 Security Key + Yubico APDU Protocol
+      // YubiKey 5 Mode: Dedicated Yubico FIDO2 Security Key + Hardware CCID SmartCard
+      yubikey_ccid_begin(); // Register Class 0x0B SmartCard interface into USB configuration descriptor
       FIDO.begin(true);
       USB.VID(0x1050); // Yubico
       USB.PID(0x0407); // YubiKey 5 Series FIDO+CCID

@@ -500,7 +500,52 @@ void YubiKeyEngine::loadConfig() {
   }
 }
 
-// --- APDU & CCID SMARTCARD PROTOCOL ENGINE ---
+// --- HMAC-SHA1 CHALLENGE-RESPONSE ---
+
+bool YubiKeyEngine::calculateHmacSha1(int slot, const uint8_t *challenge, size_t len, uint8_t *out20) {
+  if (!challenge || !out20) return false;
+
+  YubiKeySlotConfig cfg = getSlotConfig(slot);
+  std::vector<uint8_t> key;
+
+  if (cfg.secretKeyHex.length() >= 40) {
+    for (size_t i = 0; i < 40; i += 2) {
+      String byteStr = cfg.secretKeyHex.substring(i, i + 2);
+      key.push_back(static_cast<uint8_t>(strtol(byteStr.c_str(), nullptr, 16)));
+    }
+  } else if (!cfg.secretKeyHex.isEmpty()) {
+    for (size_t i = 0; i < cfg.secretKeyHex.length(); i += 2) {
+      String byteStr = cfg.secretKeyHex.substring(i, i + 2);
+      key.push_back(static_cast<uint8_t>(strtol(byteStr.c_str(), nullptr, 16)));
+    }
+  }
+
+  // Fallback to default slot key if not set
+  if (key.empty()) {
+    static const uint8_t DEFAULT_KEY[20] = {
+      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+      0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13
+    };
+    key.assign(DEFAULT_KEY, DEFAULT_KEY + 20);
+  }
+
+  const mbedtls_md_info_t *mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+  if (!mdInfo) return false;
+
+  mbedtls_md_context_t mdCtx;
+  mbedtls_md_init(&mdCtx);
+  mbedtls_md_setup(&mdCtx, mdInfo, 1);
+  mbedtls_md_hmac_starts(&mdCtx, key.data(), key.size());
+  mbedtls_md_hmac_update(&mdCtx, challenge, len);
+  mbedtls_md_hmac_finish(&mdCtx, out20);
+  mbedtls_md_free(&mdCtx);
+
+  return true;
+}
+
+// --------------------------------------------------------------------------
+// APDU & CCID SMARTCARD PROTOCOL ENGINE
+// --------------------------------------------------------------------------
 
 static const uint8_t AID_MGMT[] = {0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17};
 static const uint8_t AID_OATH[] = {0xA0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x01};
@@ -599,14 +644,13 @@ std::vector<uint8_t> YubiKeyEngine::processApdu(const uint8_t *apdu, size_t len)
     if (ins == 0x1D || ins == 0x1E) { // GET DEVICE INFO / READ CONFIG
       std::vector<uint8_t> tlv;
 
-      // Tag 0x01: Firmware version (5.4.3)
+      // Tag 0x01: TAG_USB_SUPPORTED (0x03FF = OTP | U2F | FIDO2 | OATH | OPENPGP | PIV | HSMAUTH)
       tlv.push_back(0x01);
+      tlv.push_back(0x02);
       tlv.push_back(0x03);
-      tlv.push_back(0x05);
-      tlv.push_back(0x04);
-      tlv.push_back(0x03);
+      tlv.push_back(0xFF);
 
-      // Tag 0x02: Serial number (4 bytes big-endian)
+      // Tag 0x02: TAG_SERIAL (4 bytes big-endian)
       tlv.push_back(0x02);
       tlv.push_back(0x04);
       tlv.push_back((serialNumber >> 24) & 0xFF);
@@ -614,25 +658,26 @@ std::vector<uint8_t> YubiKeyEngine::processApdu(const uint8_t *apdu, size_t len)
       tlv.push_back((serialNumber >> 8) & 0xFF);
       tlv.push_back(serialNumber & 0xFF);
 
-      // Tag 0x03: Form factor (0x01 = USB-A Keychain)
+      // Tag 0x03: TAG_USB_ENABLED (0x03FF = All apps enabled)
       tlv.push_back(0x03);
-      tlv.push_back(0x01);
-      tlv.push_back(0x01);
-
-      // Tag 0x04: USB Supported Capabilities (0x00FF = OTP | U2F | FIDO2 | OATH | OPENPGP | PIV)
-      tlv.push_back(0x04);
       tlv.push_back(0x02);
-      tlv.push_back(0x00);
+      tlv.push_back(0x03);
       tlv.push_back(0xFF);
 
-      // Tag 0x05: USB Enabled Capabilities (0x00A7 = OTP | FIDO2 | OATH)
-      tlv.push_back(0x05);
-      tlv.push_back(0x02);
-      tlv.push_back(0x00);
-      tlv.push_back(0xA7);
+      // Tag 0x04: TAG_FORM_FACTOR (0x01 = USB-A Keychain)
+      tlv.push_back(0x04);
+      tlv.push_back(0x01);
+      tlv.push_back(0x01);
 
-      // Tag 0x07: Device Flags
-      tlv.push_back(0x07);
+      // Tag 0x05: TAG_VERSION (5.4.3)
+      tlv.push_back(0x05);
+      tlv.push_back(0x03);
+      tlv.push_back(0x05);
+      tlv.push_back(0x04);
+      tlv.push_back(0x03);
+
+      // Tag 0x08: TAG_DEVICE_FLAGS
+      tlv.push_back(0x08);
       tlv.push_back(0x01);
       tlv.push_back(0x00);
 
@@ -644,9 +689,24 @@ std::vector<uint8_t> YubiKeyEngine::processApdu(const uint8_t *apdu, size_t len)
     }
   }
 
-  // 3. OATH APPLET DISPATCH
+  // 3. YUBICO OTP / KEEPASSXC CHALLENGE-RESPONSE DISPATCH (INS 0x01, 0x30, 0x38)
+  if (currentApplet == APPLET_OTP || ins == 0x01 || ins == 0x30 || ins == 0x38) {
+    int targetSlot = (ins == 0x30) ? 1 : 2; // Slot 1 or Slot 2 (KeePassXC default is Slot 2)
+    const uint8_t *challengeBytes = data ? data : (apdu + 4);
+    size_t challengeLen = data ? dataLen : (len - 4);
+
+    uint8_t hmac20[20];
+    if (calculateHmacSha1(targetSlot, challengeBytes, challengeLen, hmac20)) {
+      resp.insert(resp.end(), hmac20, hmac20 + 20);
+      resp.push_back(0x90);
+      resp.push_back(0x00);
+      return resp;
+    }
+  }
+
+  // 4. OATH APPLET DISPATCH (YKOATH Specification)
   if (currentApplet == APPLET_OATH) {
-    if (ins == 0x0A || ins == 0xA1) { // LIST
+    if (ins == 0x0A || ins == 0xA1) { // LIST ACCOUNTS
       for (const auto &acc : oathAccounts) {
         resp.push_back(0x71); // Tag 0x71: Account Name
         resp.push_back(acc.name.length() + 1);
@@ -658,26 +718,51 @@ std::vector<uint8_t> YubiKeyEngine::processApdu(const uint8_t *apdu, size_t len)
       resp.push_back(0x90);
       resp.push_back(0x00);
       return resp;
-    } else if (ins == 0x04 || ins == 0xA2) { // CALCULATE
-      time_t nowSec = time(nullptr);
-      if (nowSec < 100000) nowSec = 1715000000;
+    } else if (ins == 0x04 || ins == 0xA2 || ins == 0x02) { // CALCULATE / VALIDATE
+      // Extract Challenge bytes from Tag 0x74 or raw payload
+      const uint8_t *challengePtr = nullptr;
+      size_t challengeLen = 0;
 
-      if (oathAccounts.empty()) {
-        resp.push_back(0x69);
-        resp.push_back(0x84);
-        return resp;
+      if (data && dataLen > 2) {
+        for (size_t i = 0; i + 2 <= dataLen; i++) {
+          if (data[i] == 0x74) { // Tag 0x74: Challenge
+            size_t tLen = data[i + 1];
+            if (i + 2 + tLen <= dataLen) {
+              challengePtr = data + i + 2;
+              challengeLen = tLen;
+              break;
+            }
+          }
+        }
+      }
+      if (!challengePtr) {
+        challengePtr = data ? data : (apdu + 4);
+        challengeLen = data ? dataLen : (len - 4);
       }
 
-      String codeStr = calculateTotp(oathAccounts[0], nowSec);
-      uint32_t codeNum = codeStr.toInt();
+      uint8_t hmac20[20];
+      calculateHmacSha1(2, challengePtr, challengeLen, hmac20);
 
-      resp.push_back(0x76); // Tag 0x76: Truncated TOTP
-      resp.push_back(0x05);
-      resp.push_back(oathAccounts[0].digits); // 6
-      resp.push_back((codeNum >> 24) & 0xFF);
-      resp.push_back((codeNum >> 16) & 0xFF);
-      resp.push_back((codeNum >> 8) & 0xFF);
-      resp.push_back(codeNum & 0xFF);
+      if (p2 == 0x01 && !oathAccounts.empty()) {
+        // Truncated code requested (Tag 0x76)
+        time_t nowSec = time(nullptr);
+        if (nowSec < 100000) nowSec = 1715000000;
+        String codeStr = calculateTotp(oathAccounts[0], nowSec);
+        uint32_t codeNum = codeStr.toInt();
+
+        resp.push_back(0x76); // Tag 0x76: Truncated TOTP
+        resp.push_back(0x05);
+        resp.push_back(oathAccounts[0].digits); // 6
+        resp.push_back((codeNum >> 24) & 0xFF);
+        resp.push_back((codeNum >> 16) & 0xFF);
+        resp.push_back((codeNum >> 8) & 0xFF);
+        resp.push_back(codeNum & 0xFF);
+      } else {
+        // Full 20-byte HMAC-SHA1 Response (Tag 0x75) for Challenge-Response / Yubico Authenticator
+        resp.push_back(0x75); // Tag 0x75: Full HMAC Response
+        resp.push_back(0x14); // 20 bytes
+        resp.insert(resp.end(), hmac20, hmac20 + 20);
+      }
       resp.push_back(0x90);
       resp.push_back(0x00);
       return resp;
@@ -692,7 +777,7 @@ std::vector<uint8_t> YubiKeyEngine::processApdu(const uint8_t *apdu, size_t len)
     }
   }
 
-  // Default response: Success (0x9000) or Unsupported (0x6D00)
+  // Default response: Success (0x9000)
   resp.push_back(0x90);
   resp.push_back(0x00);
   return resp;

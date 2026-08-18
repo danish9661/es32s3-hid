@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-void yubikey_ccid_init(void);
+void yubikey_ccid_begin(void);
 
 #ifdef __cplusplus
 }
