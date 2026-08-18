@@ -2,53 +2,301 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>ESP32-S3 HID Console & YubiKey 5A Security Hub</title>
+  <title>ESP32-S3 HID Console & Security Key Hub</title>
+  <meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
-  <meta name="description" content="Professional FIDO2 Passkey, YubiKey 5A Emulation, BadUSB, and Web KVM platform for ESP32-S3.">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
-  <!-- Modern Dark Theme Stylesheet for Docsify -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-defaults.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple-dark.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css">
+  <meta name="description" content="Documentation for ESP32-S3 USB HID, FIDO2 CTAP2 Passkeys, YubiKey 5A Emulation, BadUSB, and Web KVM.">
+
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
   <style>
     :root {
-      --base-font-size: 15px;
-      --theme-color: #00f3ff;
-      --sidebar-width: 280px;
-      --sidebar-background: #0d1117;
-      --sidebar-nav-link-color: #8b949e;
-      --sidebar-nav-link-color--hover: #58a6ff;
-      --sidebar-nav-link-color--active: #00f3ff;
-      --code-inline-background: rgba(110,118,129,0.4);
-      --code-block-background: #161b22;
-      --table-row-odd-background: #161b22;
-      --heading-h1-color: #00f3ff;
-      --heading-h2-color: #58a6ff;
-      --heading-h3-color: #7ee787;
+      --bg-primary: #0a0e17;
+      --bg-secondary: #111827;
+      --bg-card: #161f30;
+      --bg-sidebar: #0d131f;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-focus: #3b82f6;
+      --text-primary: #f3f4f6;
+      --text-secondary: #9ca3af;
+      --text-muted: #6b7280;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-purple: #8b5cf6;
+      --accent-green: #10b981;
+      --code-bg: #0f172a;
+      --sidebar-width: 290px;
     }
-    .app-name-link {
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      margin: 0;
+      padding: 0;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Sidebar Styling */
+    .sidebar {
+      background-color: var(--bg-sidebar) !important;
+      border-right: 1px solid var(--border-color) !important;
+      width: var(--sidebar-width) !important;
+      padding: 24px 0 !important;
+    }
+
+    .sidebar .app-name-link {
       font-weight: 700 !important;
-      color: #00f3ff !important;
-      font-size: 1.15rem;
+      font-size: 1.05rem !important;
+      color: #ffffff !important;
+      letter-spacing: -0.01em;
+      padding: 0 20px 16px 20px !important;
+      display: block;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 16px;
+      text-decoration: none;
     }
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 12px;
-      font-size: 0.75rem;
+
+    .sidebar ul {
+      padding: 0 12px !important;
+      margin: 0 !important;
+    }
+
+    .sidebar ul li {
+      margin: 3px 0 !important;
+    }
+
+    .sidebar ul li a {
+      color: var(--text-secondary) !important;
+      font-size: 0.88rem !important;
+      font-weight: 500 !important;
+      padding: 8px 12px !important;
+      border-radius: 6px !important;
+      transition: all 0.15s ease-in-out !important;
+      text-decoration: none !important;
+      display: block;
+    }
+
+    .sidebar ul li a:hover {
+      color: #ffffff !important;
+      background-color: rgba(255, 255, 255, 0.05) !important;
+    }
+
+    .sidebar ul li.active > a {
+      color: #ffffff !important;
+      background-color: rgba(59, 130, 246, 0.15) !important;
+      font-weight: 600 !important;
+      border-left: 3px solid var(--accent-blue) !important;
+    }
+
+    .sidebar ul li strong {
+      color: var(--text-muted) !important;
+      font-size: 0.72rem !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.08em !important;
+      padding: 16px 12px 6px 12px !important;
+      display: block;
+      font-weight: 700 !important;
+    }
+
+    /* Content Area */
+    .content {
+      padding-top: 20px !important;
+      max-width: 900px !important;
+    }
+
+    .markdown-section {
+      max-width: 900px !important;
+      padding: 30px 45px 80px 45px !important;
+    }
+
+    .markdown-section h1 {
+      font-size: 2.1rem;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.025em;
+      margin-top: 0;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .markdown-section h2 {
+      font-size: 1.45rem;
       font-weight: 600;
-      margin-left: 6px;
+      color: #f9fafb;
+      letter-spacing: -0.02em;
+      margin-top: 2.2rem;
+      margin-bottom: 0.85rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--border-color);
     }
-    .badge-ok { background: #238636; color: #fff; }
-    .badge-purple { background: #8957e5; color: #fff; }
-    .badge-cyan { background: #1f6feb; color: #fff; }
+
+    .markdown-section h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: #e5e7eb;
+      margin-top: 1.6rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .markdown-section p, .markdown-section li {
+      color: #d1d5db;
+      font-size: 0.95rem;
+      line-height: 1.7;
+    }
+
+    .markdown-section a {
+      color: var(--accent-blue);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .markdown-section a:hover {
+      text-decoration: underline;
+    }
+
+    /* Code Blocks */
+    .markdown-section code {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 0.85em !important;
+      background-color: var(--code-bg) !important;
+      color: #38bdf8 !important;
+      padding: 3px 6px !important;
+      border-radius: 4px !important;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .markdown-section pre {
+      background-color: var(--code-bg) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 8px !important;
+      padding: 16px 20px !important;
+      overflow-x: auto;
+      margin: 1.2rem 0;
+    }
+
+    .markdown-section pre > code {
+      background-color: transparent !important;
+      color: #e2e8f0 !important;
+      padding: 0 !important;
+      border: none !important;
+      font-size: 0.88em !important;
+      line-height: 1.55;
+    }
+
+    /* Tables */
+    .markdown-section table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.4rem 0;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 0.88rem;
+    }
+
+    .markdown-section th {
+      background-color: var(--bg-card);
+      color: #ffffff;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .markdown-section td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      color: #d1d5db;
+    }
+
+    .markdown-section tr:nth-child(even) {
+      background-color: rgba(255, 255, 255, 0.015);
+    }
+
+    .markdown-section tr:hover {
+      background-color: rgba(255, 255, 255, 0.03);
+    }
+
+    /* Blockquotes */
+    .markdown-section blockquote {
+      border-left: 3px solid var(--accent-blue);
+      background: rgba(59, 130, 246, 0.06);
+      margin: 1.2rem 0;
+      padding: 12px 18px;
+      border-radius: 0 6px 6px 0;
+      color: #cbd5e1;
+    }
+
+    .markdown-section blockquote p {
+      margin: 0;
+      color: #cbd5e1;
+    }
+
+    /* Search Input */
+    .search {
+      padding: 0 16px 16px 16px !important;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 12px;
+    }
+
+    .search input {
+      background: rgba(255, 255, 255, 0.05) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 6px !important;
+      color: #ffffff !important;
+      font-size: 0.85rem !important;
+      padding: 8px 12px !important;
+      width: 100% !important;
+      outline: none;
+      transition: all 0.15s ease;
+    }
+
+    .search input:focus {
+      border-color: var(--accent-blue) !important;
+      background: rgba(255, 255, 255, 0.08) !important;
+    }
+
+    .search .matching-post {
+      border-bottom: 1px solid var(--border-color) !important;
+    }
+
+    /* GitHub Corner / Clean Toggle */
+    .github-corner svg {
+      fill: #1f2937 !important;
+      color: #9ca3af !important;
+    }
+
+    /* Docsify Pagination */
+    .docsify-pagination-container {
+      border-top: 1px solid var(--border-color) !important;
+      padding: 24px 0 !important;
+      margin-top: 40px !important;
+    }
+
+    .pagination-item-title {
+      color: var(--accent-blue) !important;
+      font-weight: 600 !important;
+    }
+
+    .pagination-item-subtitle {
+      color: var(--text-muted) !important;
+    }
   </style>
 </head>
 <body>
   <div id="app">Loading documentation...</div>
   <script>
     window.$docsify = {
-      name: '🛡️ ESP32-S3 Security Hub',
+      name: 'ESP32-S3 Security Hub',
       repo: 'https://github.com/danish9661/es32s3-hid',
       loadSidebar: true,
       subMaxLevel: 3,
@@ -61,19 +309,19 @@
         depth: 4
       },
       copyCode: {
-        buttonText: '📋 Copy',
+        buttonText: 'Copy',
         errorText: 'Error',
-        successText: 'Copied!'
+        successText: 'Copied'
       },
       pagination: {
-        previousText: 'Previous Page',
-        nextText: 'Next Page',
+        previousText: 'Previous',
+        nextText: 'Next',
         crossChapter: true
       }
     }
   </script>
   <!-- Docsify Core and Plugins -->
-  <script src="https://cdn.jsdelivr.net/npm/docsify@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify-pagination/dist/docsify-pagination.min.js"></script>

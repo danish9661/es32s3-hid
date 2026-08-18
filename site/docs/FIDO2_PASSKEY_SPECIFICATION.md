@@ -14,14 +14,14 @@ All USB packets are formatted into 64-byte USB HID endpoints. Long CBOR payloads
 
 | Command Code | Command Name | Status | Technical Implementation & Behavior |
 | :---: | :--- | :---: | :--- |
-| **`0x86`** | **`CTAPHID_INIT`** | ✅ **Active** | Initiates channel handshake. Generates unique 32-bit `CID`, echoes 8-byte nonce, returns protocol version `2`, and declares capability flags `CAPFLAG_WINK \| CAPFLAG_CBOR \| CAPFLAG_NMSG`. |
-| **`0x81`** | **`CTAPHID_PING`** | ✅ **Active** | Echoes received binary payload back to host for latency calibration and liveness testing. |
-| **`0x88`** | **`CTAPHID_WINK`** | ✅ **Active** | Visual hardware identification. Sends empty response and executes a visual LED pulse to assist user device localization. |
-| **`0x90`** | **`CTAPHID_CBOR`** | ✅ **Active** | Primary CTAP2 payload transport. Reassembles multi-packet input and forwards decoded commands to the FIDO FreeRTOS worker queue. |
-| **`0x83`** | **`CTAPHID_MSG`** | ✅ **Active** | Legacy U2F compatibility pipe. Handles `U2F_VERSION` (`"U2F_V2\x90\x00"`) and returns ISO 7816-4 status `0x6D00` (`SW_INS_NOT_SUPPORTED`) to guide browsers to native CTAP2. |
-| **`0x91`** | **`CTAPHID_CANCEL`** | ✅ **Active** | Asynchronously cancels pending touch-waiting state when the browser tab closes or times out. |
-| **`0xBB`** | **`CTAPHID_KEEPALIVE`** | ✅ **Active** | Periodically transmits `0x01 (USER_PRESENCE_NEEDED)` every 150ms to maintain USB endpoint activity during physical touch wait. |
-| **`0xBF`** | **`CTAPHID_ERROR`** | ✅ **Active** | Encapsulates CTAPHID transport error codes (`INVALID_CMD`, `INVALID_PAR`, `INVALID_LEN`, `CHANNEL_BUSY`). |
+| **`0x86`** | **`CTAPHID_INIT`** | **Active** | Initiates channel handshake. Generates unique 32-bit `CID`, echoes 8-byte nonce, returns protocol version `2`, and declares capability flags `CAPFLAG_WINK \| CAPFLAG_CBOR \| CAPFLAG_NMSG`. |
+| **`0x81`** | **`CTAPHID_PING`** | **Active** | Echoes received binary payload back to host for latency calibration and liveness testing. |
+| **`0x88`** | **`CTAPHID_WINK`** | **Active** | Visual hardware identification. Sends empty response and executes a visual LED pulse to assist user device localization. |
+| **`0x90`** | **`CTAPHID_CBOR`** | **Active** | Primary CTAP2 payload transport. Reassembles multi-packet input and forwards decoded commands to the FIDO FreeRTOS worker queue. |
+| **`0x83`** | **`CTAPHID_MSG`** | **Active** | Legacy U2F compatibility pipe. Handles `U2F_VERSION` (`"U2F_V2\x90\x00"`) and returns ISO 7816-4 status `0x6D00` (`SW_INS_NOT_SUPPORTED`) to guide browsers to native CTAP2. |
+| **`0x91`** | **`CTAPHID_CANCEL`** | **Active** | Asynchronously cancels pending touch-waiting state when the browser tab closes or times out. |
+| **`0xBB`** | **`CTAPHID_KEEPALIVE`** | **Active** | Periodically transmits `0x01 (USER_PRESENCE_NEEDED)` every 150ms to maintain USB endpoint activity during physical touch wait. |
+| **`0xBF`** | **`CTAPHID_ERROR`** | **Active** | Encapsulates CTAPHID transport error codes (`INVALID_CMD`, `INVALID_PAR`, `INVALID_LEN`, `CHANNEL_BUSY`). |
 
 ---
 
@@ -30,15 +30,15 @@ CTAP2 commands are encapsulated inside `CTAPHID_CBOR` (`0x90`) frames and encode
 
 | Command Code | Command Name | CTAP Version | Status | Technical Implementation & Behavior |
 | :---: | :--- | :---: | :---: | :--- |
-| **`0x04`** | **`authenticatorGetInfo`** | CTAP 2.0 / 2.1 | ✅ **Active** | Returns capabilities: `versions: ["FIDO_2_0", "FIDO_2_1"]`, `extensions: ["credProps", "hmac-secret", "largeBlobKey"]`, `options: {"rk": true, "up": true, "uv": true, "credMgmt": true, "clientPin": bool, "largeBlobs": true}`, `maxLargeBlob: 2048`, `minPinLength: 4`. |
-| **`0x01`** | **`authenticatorMakeCredential`** | CTAP 2.0 / 2.1 | ✅ **Active** | Generates hardware-accelerated NIST P-256 ECC keypair, persists discoverable passkey in flash, computes packed self-attestation, and returns `unsignedExtensionOutputs: {"credProps": {"rk": true}}`. |
-| **`0x02`** | **`authenticatorGetAssertion`** | CTAP 2.0 / 2.1 | ✅ **Active** | Single-touch authentication. Matches target credential via `allowList` or `rpId`, handles silent presence (`up: false`), increments monotonic signature counter, computes ECDSA signature, and outputs `0x04: user` descriptor. |
-| **`0x03`** | **`authenticatorGetNextAssertion`** | CTAP 2.0 | ✅ **Active** | Standards fallback. Returns `CTAP2_ERR_NOT_ALLOWED` when multiple assertions are not queued. |
-| **`0x06`** | **`authenticatorClientPIN`** | CTAP 2.0 / 2.1 | ✅ **Active** | Full **CTAP2 PIN Protocol 1**. Supports ephemeral ECDH NIST P-256 key agreement, AES-256-CBC decryption, HMAC-SHA-256 PIN authentication, 8-attempt brute-force protection, and `pinToken` generation for Windows Hello and WebAuthn PIN management. |
-| **`0x07`** | **`authenticatorReset`** | CTAP 2.0 / 2.1 | ✅ **Active** | Security-gated hardware factory reset. Demands physical `BOOT` button touch, then wipes all stored credentials, PIN, and large blobs in flash and resets global monotonic counters. |
-| **`0x0A`** | **`authenticatorCredentialManagement`** | CTAP 2.1 | ✅ **Active** | Enables OS & browser passkey management: `getCredsMetadata` (`0x01`), `enumerateRPs` (`0x02`/`0x03`), `enumerateCredentials` (`0x04`/`0x05`), and individual passkey deletion (`0x06`) over USB. |
-| **`0x0B`** | **`authenticatorSelection`** | CTAP 2.1 | ✅ **Active** | Cross-platform visual presence & browser passkey discovery probe. |
-| **`0x0C`** | **`authenticatorLargeBlobs`** | CTAP 2.1 | ✅ **Active** | High-performance NVS flash & RAM-cached storage for arbitrary data and SSH certificates (up to 2048 bytes). |
+| **`0x04`** | **`authenticatorGetInfo`** | CTAP 2.0 / 2.1 | **Active** | Returns capabilities: `versions: ["FIDO_2_0", "FIDO_2_1"]`, `extensions: ["credProps", "hmac-secret", "largeBlobKey"]`, `options: {"rk": true, "up": true, "uv": true, "credMgmt": true, "clientPin": bool, "largeBlobs": true}`, `maxLargeBlob: 2048`, `minPinLength: 4`. |
+| **`0x01`** | **`authenticatorMakeCredential`** | CTAP 2.0 / 2.1 | **Active** | Generates hardware-accelerated NIST P-256 ECC keypair, persists discoverable passkey in flash, computes packed self-attestation, and returns `unsignedExtensionOutputs: {"credProps": {"rk": true}}`. |
+| **`0x02`** | **`authenticatorGetAssertion`** | CTAP 2.0 / 2.1 | **Active** | Single-touch authentication. Matches target credential via `allowList` or `rpId`, handles silent presence (`up: false`), increments monotonic signature counter, computes ECDSA signature, and outputs `0x04: user` descriptor. |
+| **`0x03`** | **`authenticatorGetNextAssertion`** | CTAP 2.0 | **Active** | Standards fallback. Returns `CTAP2_ERR_NOT_ALLOWED` when multiple assertions are not queued. |
+| **`0x06`** | **`authenticatorClientPIN`** | CTAP 2.0 / 2.1 | **Active** | Full **CTAP2 PIN Protocol 1**. Supports ephemeral ECDH NIST P-256 key agreement, AES-256-CBC decryption, HMAC-SHA-256 PIN authentication, 8-attempt brute-force protection, and `pinToken` generation for Windows Hello and WebAuthn PIN management. |
+| **`0x07`** | **`authenticatorReset`** | CTAP 2.0 / 2.1 | **Active** | Security-gated hardware factory reset. Demands physical `BOOT` button touch, then wipes all stored credentials, PIN, and large blobs in flash and resets global monotonic counters. |
+| **`0x0A`** | **`authenticatorCredentialManagement`** | CTAP 2.1 | **Active** | Enables OS & browser passkey management: `getCredsMetadata` (`0x01`), `enumerateRPs` (`0x02`/`0x03`), `enumerateCredentials` (`0x04`/`0x05`), and individual passkey deletion (`0x06`) over USB. |
+| **`0x0B`** | **`authenticatorSelection`** | CTAP 2.1 | **Active** | Cross-platform visual presence & browser passkey discovery probe. |
+| **`0x0C`** | **`authenticatorLargeBlobs`** | CTAP 2.1 | **Active** | High-performance NVS flash & RAM-cached storage for arbitrary data and SSH certificates (up to 2048 bytes). |
 
 ---
 
@@ -56,7 +56,7 @@ CTAP2 commands are encapsulated inside `CTAPHID_CBOR` (`0x90`) frames and encode
 | :--- | :--- | :---: | :--- |
 | **Idle Dedicated Mode** | 🟦 **Neon Ice Blue** | `(0, 180, 255)` | Steady solid glow |
 | **Registration (`MakeCredential`)** | 🟪 **Neon Electric Magenta** | `(255, 0, 180)` | Rapid pulse (160ms) awaiting physical touch |
-| **Authentication (`GetAssertion`)** | 🔷 **Neon Electric Cyan** | `(0, 255, 255)` | Rapid pulse (160ms) awaiting physical touch |
+| **Authentication (`GetAssertion`)** | **Neon Electric Cyan** | `(0, 255, 255)` | Rapid pulse (160ms) awaiting physical touch |
 | **Security Reset (`Reset`)** | 🟧 **Neon Electric Amber** | `(255, 80, 0)` | Rapid warning flash (120ms) awaiting touch |
 | **Hardware WINK (`Identify`)** | 🟪 **Neon Electric Violet** | `(180, 0, 255)` | 4 quick confirmation flashes |
 | **Touch Confirmed / Success** | 🟩 **Neon Lime Green** | `(0, 255, 60)` | 300ms bright success flash |
@@ -67,18 +67,18 @@ CTAP2 commands are encapsulated inside `CTAPHID_CBOR` (`0x90`) frames and encode
 
 ```mermaid
 flowchart TD
-    A[Browser sends CTAP2 GetAssertion] --> B{Does request have allowList?}
-    B -- Yes (Targeted Login) --> C[Search flash storage for matching Credential ID]
-    B -- No (Passwordless / Autofill) --> D[Search flash storage for matching RP ID domain]
-    C --> E{Credential Found?}
-    D --> E
-    E -- No --> N[Return CTAP2_ERR_NO_CREDENTIALS 0x2E]
-    E -- Yes --> F[Verify User Presence & Verification]
-    F --> G[ESP32 Blinks Cyan LED & Awaits Physical BOOT Press]
-    G --> H[User Presses Physical BOOT Button]
-    H --> I[Increment Monotonic Counter & Generate ECDSA P-256 Signature]
-    I --> J[Return authData + Signature + User Descriptor]
-    J --> K[Browser / OS Logs In Successfully]
+ A[Browser sends CTAP2 GetAssertion] --> B{Does request have allowList?}
+ B -- Yes (Targeted Login) --> C[Search flash storage for matching Credential ID]
+ B -- No (Passwordless / Autofill) --> D[Search flash storage for matching RP ID domain]
+ C --> E{Credential Found?}
+ D --> E
+ E -- No --> N[Return CTAP2_ERR_NO_CREDENTIALS 0x2E]
+ E -- Yes --> F[Verify User Presence & Verification]
+ F --> G[ESP32 Blinks Cyan LED & Awaits Physical BOOT Press]
+ G --> H[User Presses Physical BOOT Button]
+ H --> I[Increment Monotonic Counter & Generate ECDSA P-256 Signature]
+ I --> J[Return authData + Signature + User Descriptor]
+ J --> K[Browser / OS Logs In Successfully]
 ```
 
 ### Handling Multiple Accounts for the Same Service
@@ -91,11 +91,11 @@ flowchart TD
 
 | Operating System | Browser / Client | Result | Protocol Path |
 | :--- | :--- | :---: | :--- |
-| **Windows 11 / 10** | Google Chrome, MS Edge, Brave | ✅ **Pass** | Native Windows Hello `webauthn.dll` API |
-| **Linux (Fedora / Ubuntu / Arch)** | Mozilla Firefox | ✅ **Pass** | Native `libfido2` direct HID access |
-| **Linux (Fedora / Ubuntu / Arch)** | Google Chrome, Brave, Chromium | ✅ **Pass** | Chromium `HidServiceLinux` CTAP2 stack |
-| **macOS & iOS** | Safari, Chrome, Edge | ✅ **Pass** | Native Apple WebAuthenticationKit |
-| **Android (10+)** | Chrome, Samsung Internet | ✅ **Pass** | Google Play Services FIDO2 Client |
+| **Windows 11 / 10** | Google Chrome, MS Edge, Brave | **Pass** | Native Windows Hello `webauthn.dll` API |
+| **Linux (Fedora / Ubuntu / Arch)** | Mozilla Firefox | **Pass** | Native `libfido2` direct HID access |
+| **Linux (Fedora / Ubuntu / Arch)** | Google Chrome, Brave, Chromium | **Pass** | Chromium `HidServiceLinux` CTAP2 stack |
+| **macOS & iOS** | Safari, Chrome, Edge | **Pass** | Native Apple WebAuthenticationKit |
+| **Android (10+)** | Chrome, Samsung Internet | **Pass** | Google Play Services FIDO2 Client |
 
 ---
 
@@ -165,14 +165,14 @@ Tested and verified against live ESP32-S3 hardware via `python-fido2` and native
 
 | Test Item | Command / Subsystem | Status | Result |
 | :--- | :--- | :---: | :--- |
-| **1. Authenticator Info** | `0x04 (GetInfo)` | ✅ **PASS** | `versions: ["U2F_V2", "FIDO_2_0", "FIDO_2_1"]`, `extensions: ["credProps", "hmac-secret", "largeBlobKey", "credProtect"]` |
-| **2. Client PIN Protocol** | `0x06 (ClientPIN)` | ✅ **PASS** | Ephemeral ECDH key agreement, AES-256-CBC token encryption, PIN `1075` validation |
-| **3. Large Blobs** | `0x0C (LargeBlobs)` | ✅ **PASS** | Read/write arbitrary blob data (NVS backed + RAM cached) |
-| **4. Credential Management** | `0x0A (CredMan)` | ✅ **PASS** | Metadata inspection (`{1: 8, 2: 42}`), resident key enumeration |
-| **5. Ed25519 Signing** | `0x01 / 0x02 (alg: -8)` | ✅ **PASS** | MakeCredential + GetAssertion verified with `FLAG_USER_VERIFIED (0x04)` |
-| **6. CredProtect Extension** | `credProtect: 2` | ✅ **PASS** | Strict client request matching; returned in `authData` extension block |
-| **7. Silent Probe** | `options.up: false` | ✅ **PASS** | Zero-latency probe execution without blocking for physical touch |
-| **8. WebAuthn Cross-Browser** | Chrome, Firefox, Edge | ✅ **PASS** | Seamless cross-platform registration and authentication on `webauthn.io` |
+| **1. Authenticator Info** | `0x04 (GetInfo)` | **PASS** | `versions: ["U2F_V2", "FIDO_2_0", "FIDO_2_1"]`, `extensions: ["credProps", "hmac-secret", "largeBlobKey", "credProtect"]` |
+| **2. Client PIN Protocol** | `0x06 (ClientPIN)` | **PASS** | Ephemeral ECDH key agreement, AES-256-CBC token encryption, PIN `1075` validation |
+| **3. Large Blobs** | `0x0C (LargeBlobs)` | **PASS** | Read/write arbitrary blob data (NVS backed + RAM cached) |
+| **4. Credential Management** | `0x0A (CredMan)` | **PASS** | Metadata inspection (`{1: 8, 2: 42}`), resident key enumeration |
+| **5. Ed25519 Signing** | `0x01 / 0x02 (alg: -8)` | **PASS** | MakeCredential + GetAssertion verified with `FLAG_USER_VERIFIED (0x04)` |
+| **6. CredProtect Extension** | `credProtect: 2` | **PASS** | Strict client request matching; returned in `authData` extension block |
+| **7. Silent Probe** | `options.up: false` | **PASS** | Zero-latency probe execution without blocking for physical touch |
+| **8. WebAuthn Cross-Browser** | Chrome, Firefox, Edge | **PASS** | Seamless cross-platform registration and authentication on `webauthn.io` |
 
 ---
 
@@ -184,24 +184,24 @@ The ESP32-S3 firmware incorporates a dedicated **FIDO Alliance BLE Profile (`0xF
 
 1. **Primary Service UUID**: `0000FFFD-0000-1000-8000-00805F9B34FB` (Official FIDO Alliance GATT Service).
 2. **GATT Characteristic Architecture**:
-   * **`fidoControlPoint` (`F1D0FFF1-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
-     * *Properties*: `WRITE` | `WRITE_NR`
-     * *Function*: Receives fragmented CTAP2/U2F command packets (Header: `CMD` + 16-bit `LEN` + Payload, followed by Sequence packets `0x00..0x7F`).
-   * **`fidoStatus` (`F1D0FFF2-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
-     * *Properties*: `NOTIFY` | `READ`
-     * *Function*: Transmits fragmented responses, error notifications (`0xBF`), and periodic keepalives (`0x82`) during physical touch wait. Initialized with `0x00`.
-   * **`fidoControlPointLength` (`F1D0FFF3-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
-     * *Properties*: `READ`
-     * *Function*: Reports maximum frame size buffer capacity (`0x0200` = 512 bytes big-endian).
-   * **`fidoServiceRevision` (`00002A28-0000-1000-8000-00805F9B34FB`)**:
-     * *Properties*: `READ`
-     * *Function*: U2F service revision string (`"1.2"`).
-   * **`fidoServiceRevisionBitfield` (`F1D0FFF4-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
-     * *Properties*: `READ` | `WRITE` | `WRITE_NR`
-     * *Function*: Declares FIDO version support (`0x80` for FIDO 2.0). Client writes back desired version during initialization.
+ * **`fidoControlPoint` (`F1D0FFF1-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+ * *Properties*: `WRITE` | `WRITE_NR`
+ * *Function*: Receives fragmented CTAP2/U2F command packets (Header: `CMD` + 16-bit `LEN` + Payload, followed by Sequence packets `0x00..0x7F`).
+ * **`fidoStatus` (`F1D0FFF2-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+ * *Properties*: `NOTIFY` | `READ`
+ * *Function*: Transmits fragmented responses, error notifications (`0xBF`), and periodic keepalives (`0x82`) during physical touch wait. Initialized with `0x00`.
+ * **`fidoControlPointLength` (`F1D0FFF3-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+ * *Properties*: `READ`
+ * *Function*: Reports maximum frame size buffer capacity (`0x0200` = 512 bytes big-endian).
+ * **`fidoServiceRevision` (`00002A28-0000-1000-8000-00805F9B34FB`)**:
+ * *Properties*: `READ`
+ * *Function*: U2F service revision string (`"1.2"`).
+ * **`fidoServiceRevisionBitfield` (`F1D0FFF4-DEAA-ECEE-B42F-C9BA7ED623BB`)**:
+ * *Properties*: `READ` | `WRITE` | `WRITE_NR`
+ * *Function*: Declares FIDO version support (`0x80` for FIDO 2.0). Client writes back desired version during initialization.
 3. **BLE Advertising**:
-   * Advertises Service UUID `0xFFFD` with Service Data flag `0x80` (CTAP2 capable).
-   * Advertising intervals calibrated between `100ms` (`0x00A0`) and `150ms` (`0x00F0`).
+ * Advertises Service UUID `0xFFFD` with Service Data flag `0x80` (CTAP2 capable).
+ * Advertising intervals calibrated between `100ms` (`0x00A0`) and `150ms` (`0x00F0`).
 4. **Security & Cryptography Delegation**:
-   * Utilizes NimBLE SMP security callbacks for Just-Works AES-128 pairing and link encryption.
-   * Incoming CBOR payloads from `fidoControlPoint` are routed directly to `GlobalFidoEngine.processCbor()`, ensuring 100% feature parity with USB (P-256 ECC, HMAC-secret, resident keys, PIN protocol).
+ * Utilizes NimBLE SMP security callbacks for Just-Works AES-128 pairing and link encryption.
+ * Incoming CBOR payloads from `fidoControlPoint` are routed directly to `GlobalFidoEngine.processCbor()`, ensuring 100% feature parity with USB (P-256 ECC, HMAC-secret, resident keys, PIN protocol).
