@@ -404,7 +404,23 @@
                   <button class="btn-outline btn-sm" id="bip39-copy-phrase">Copy All 24 Words</button>
                 </div>
               </div>
-              <div id="bip39-status-msg" class="status-line" style="margin-top:8px;"></div>
+            <!-- Encrypted Hardware Vault Backup & Restore Card -->
+            <div class="network-info-card" style="margin-top:20px; background:rgba(0,243,255,0.03); border-color:rgba(0,243,255,0.2);">
+              <div class="network-head">
+                <div>
+                  <h4 style="display:flex; align-items:center; gap:8px;">
+                    <span>🛡️ Encrypted Vault Backup & Restore</span>
+                    <span class="badge ok">AES-256-GCM</span>
+                  </h4>
+                  <p class="small" style="margin:2px 0 0;">Create an encrypted hardware backup file (.esp32vault) containing all your Passkeys, 2FA OATH secrets, and KeePassXC settings.</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <input type="file" id="vault-backup-file-input" accept=".esp32vault,.json" class="hidden">
+                  <button type="button" id="vault-export-backup-btn" class="btn-primary btn-sm" style="background:#00f3ff; border-color:#00f3ff; color:#000000;">⬇️ Export Backup</button>
+                  <button type="button" id="vault-import-backup-btn" class="btn-outline btn-sm">⬆️ Restore Backup</button>
+                </div>
+              </div>
+              <div id="vault-backup-status-msg" class="status-line" style="margin-top:8px;"></div>
             </div>
           </div>
 

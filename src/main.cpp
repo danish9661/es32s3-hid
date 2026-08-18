@@ -5915,9 +5915,13 @@ void registerRoutes() {
     if (request->hasParam("enabled")) {
       enable = (request->getParam("enabled")->value() == "1" || request->getParam("enabled")->value() == "true");
     }
+    bool changed = (enable != YubiKey.isYubiKeyMode());
     YubiKey.setYubiKeyMode(enable);
-    logSystem(enable ? "[YubiKey] YubiKey 5 Emulation Mode ENABLED" : "[YubiKey] Standard FIDO2 Mode RESTORED");
-    request->send(200, "application/json", "{\"ok\":true,\"yubikey_mode\":" + String(enable ? "true" : "false") + "}");
+    logSystem(enable ? "[YubiKey] YubiKey 5 Emulation Mode ENABLED (Rebooting...)" : "[YubiKey] Standard FIDO2 Mode RESTORED (Rebooting...)");
+    request->send(200, "application/json", "{\"ok\":true,\"yubikey_mode\":" + String(enable ? "true" : "false") + ",\"rebooting\":true}");
+    if (changed) {
+      indicateRebootAndRestart(500);
+    }
   });
 
   server.on("/api/yubikey/slot/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,

@@ -4081,8 +4081,8 @@ function bindYubiKeyEvents() {
     try {
       const res = await api(`/api/yubikey/mode?enabled=${nextMode ? "1" : "0"}`, { method: "POST" });
       if (res.ok) {
-        await loadYubiKeyStatus();
-        setText("yubi-status-msg", nextMode ? "✅ YubiKey 5 Mode Active! Reboot device to apply USB identity." : "✅ Standard FIDO2 Mode Active! Reboot device to apply.");
+        setText("yubi-status-msg", nextMode ? "🔄 Switching to YubiKey 5 Mode... Applying USB identity automatically..." : "🔄 Restoring Standard Mode... Applying USB identity automatically...");
+        setTimeout(() => location.reload(), 3500);
       }
     } catch (_) {
       setText("yubi-status-msg", "❌ Failed to change profile.");

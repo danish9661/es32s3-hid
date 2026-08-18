@@ -25,6 +25,7 @@ struct FidoRequestContext {
   bool requestedCredProtect;
   uint8_t credProtectPolicy;
   int requestedAlgorithm;
+  uint8_t enterpriseAttestation;
   uint32_t requestTime;
 };
 

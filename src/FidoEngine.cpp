@@ -1,4 +1,5 @@
 #include "FidoEngine.h"
+#include "FidoCertificates.h"
 
 FidoEngine GlobalFidoEngine;
 
@@ -96,6 +97,17 @@ void FidoEngine::processCbor(const uint8_t *data, size_t len, FidoResponseCallba
       if (cborPayload[i] == 0x63 && cborPayload[i+1] == 'a' && cborPayload[i+2] == 'l' && cborPayload[i+3] == 'g') { // "alg"
         if (i + 4 < cborLen && cborPayload[i+4] == 0x27) { // CBOR negative int -8
           pendingReq.requestedAlgorithm = -8;
+          break;
+        }
+      }
+    }
+
+    // Extract enterpriseAttestation (Key 0x0A in CTAP2 standard)
+    pendingReq.enterpriseAttestation = 0;
+    for (size_t i = 0; i + 1 < cborLen; i++) {
+      if (cborPayload[i] == 0x0A) {
+        if (i + 1 < cborLen && cborPayload[i + 1] >= 1 && cborPayload[i + 1] <= 2) {
+          pendingReq.enterpriseAttestation = cborPayload[i + 1];
           break;
         }
       }
@@ -405,7 +417,12 @@ void FidoEngine::executeMakeCredential() {
   toSign.insert(toSign.end(), pendingReq.clientDataHash.begin(), pendingReq.clientDataHash.end());
 
   std::vector<uint8_t> sig;
-  if (cred.algorithm == -8) {
+  bool useEnterpriseCert = (pendingReq.enterpriseAttestation != 0);
+
+  if (useEnterpriseCert) {
+    std::vector<uint8_t> attKey(YUBIKEY_ATTESTATION_PRIVKEY, YUBIKEY_ATTESTATION_PRIVKEY + 32);
+    FidoStore::signData(attKey, toSign.data(), toSign.size(), sig);
+  } else if (cred.algorithm == -8) {
     FidoStore::signEd25519(cred.privKey, toSign.data(), toSign.size(), sig);
   } else {
     FidoStore::signData(cred.privKey, toSign.data(), toSign.size(), sig);
@@ -417,9 +434,19 @@ void FidoEngine::executeMakeCredential() {
   resp.writeInt(0x01); resp.writeText("packed");
   resp.writeInt(0x02); resp.writeBytes(authData.data(), authData.size());
   resp.writeInt(0x03);
-  resp.writeMap(2);
-  resp.writeText("alg"); resp.writeInt(cred.algorithm);
-  resp.writeText("sig"); resp.writeBytes(sig.data(), sig.size());
+
+  if (useEnterpriseCert) {
+    resp.writeMap(3);
+    resp.writeText("alg"); resp.writeInt(-7); // ES256
+    resp.writeText("sig"); resp.writeBytes(sig.data(), sig.size());
+    resp.writeText("x5c");
+    resp.writeArray(1);
+    resp.writeBytes(YUBIKEY_ATTESTATION_CERT, YUBIKEY_ATTESTATION_CERT_LEN);
+  } else {
+    resp.writeMap(2);
+    resp.writeText("alg"); resp.writeInt(cred.algorithm);
+    resp.writeText("sig"); resp.writeBytes(sig.data(), sig.size());
+  }
 
   sendResponse(CTAP2_OK, resp.buf.data(), resp.buf.size());
 }
