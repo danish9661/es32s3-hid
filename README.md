@@ -22,12 +22,23 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 
 ---
 
+---
+
 ## Highlights & Features
 
+- **The 3 Hardware Operating Modes**:
+  - 🟢 **Normal Ducky HID Mode** (`Green LED`): Keyboard, Mouse, Web KVM, and 2 MB USB Mass Storage (`DUCKY_DRIVE`).
+  - 🔷 **Standard FIDO2 Passkey Mode** (`Cyan LED`): Pure FIDO Alliance security key (`0x10C4:0x8A2A`).
+  - 🟣 **YubiKey 5 Security Key Mode** (`Dark Purple LED`): Official Yubico emulation (`0x1050:0x0407`), Yubico Management Applet (`ykman`), Yubico Authenticator (OATH-TOTP), and Dual-Slot Touch OTP.
 - **FIDO2 / WebAuthn Hardware Security Key**:
   - Full W3C WebAuthn & CTAP 2.0 / 2.1 compliance (NIST P-256 ECC, SHA-256, HMAC-secret PRF).
   - Compatible with Google, GitHub, Apple, Microsoft, Bitwarden, 1Password, Windows Hello, and Android Google Play Services.
   - Dedicated Passkey Mode with 2.5s physical `BOOT` button gesture toggling.
+- **Yubico YubiKey 5 Series Emulation Engine**:
+  - **Yubico Management Applet (`A0 00 00 05 27 47 11 17`)**: Recognized by `YubiKey Manager (ykman)` CLI & GUI with firmware version `5.4.3`.
+  - **Yubico OATH Applet (`A0 00 00 05 27 21 01`)**: Compatible with desktop & mobile Yubico Authenticator apps.
+  - **Dual-Slot Touch Trigger**: Short tap generates 44-character Modhex Yubico OTP tokens or static password.
+  - **KeePassXC Physical Challenge-Response**: 20-byte HMAC-SHA1 challenge-response for database unlocking.
 - **Zero-Knowledge Encrypted Vault & 2FA Authenticator**:
   - Encrypted with **AES-256-GCM** and **PBKDF2-HMAC-SHA256** (100,000 iterations).
   - Live 2FA TOTP code generator with auto-typing and auto-fill.
@@ -61,6 +72,18 @@ A professional web-based USB HID injection engine and ultra-low latency KVM brid
 
 ---
 
+## Operating Modes & LED Status
+
+| Mode | Onboard LED | USB VID:PID | Purpose & Capabilities |
+| :--- | :--- | :--- | :--- |
+| **1. Normal HID Mode** | 🟢 **Solid Green** `(0, 255, 0)` | Custom / Spoofed | Ducky scripting, Web KVM, Virtual MSC Drive (`DUCKY_DRIVE`), Touch Slot 1 OTP/Pass |
+| **2. Standard Passkey** | 🔷 **Solid Cyan** `(0, 180, 255)` | `0x10C4:0x8A2A` | Standard FIDO Alliance Passkey for WebAuthn, Chrome, Windows Hello |
+| **3. YubiKey 5 Mode** | 🟣 **Solid Dark Purple** `(120, 0, 180)` | `0x1050:0x0407` | Yubico 5 Series emulation, `ykman` Management, Yubico OATH applet, Dual-Slot OTP |
+
+> 📖 **Full YubiKey Guide**: See [docs/YUBIKEY_EMULATION_GUIDE.md](docs/YUBIKEY_EMULATION_GUIDE.md) for complete protocol details, slot configuration, and Yubico Authenticator sync.
+
+---
+
 ## FIDO2 Hardware Passkeys & Encrypted Vault
 
 The ESP32-S3 functions as a **standalone FIDO2 / WebAuthn physical security key** (similar to a YubiKey 5 Series) combined with a **Zero-Knowledge Encrypted Software Vault**:
@@ -78,7 +101,7 @@ graph TD
 ### Key Capabilities:
 1. **Physical Presence (`BOOT` Button Gesture)**:
    - When a website requests a passkey login or registration, the ESP32 waits for physical touch on the **`BOOT` button**.
-   - **Mode Toggle Gesture**: Hold the physical `BOOT` button for **2.5 seconds** anytime to switch between **💻 Normal Ducky Mode** (Green LED) and **🛡️ Dedicated Passkey Mode** (Neon Cyan LED).
+   - **Mode Toggle Gesture**: Hold the physical `BOOT` button for **2.5 seconds** anytime to switch between **💻 Normal Ducky Mode** (Green LED) and **🛡️ Dedicated Passkey Mode** (Cyan / Dark Purple LED).
 2. **Biometric UV Emulation Toggle (`uv: true`)**:
    - Easily toggle between **Standard Roaming Key (`uv: false`)** and **Emulated Biometric Verification (`uv: true`)** from the Web Vault dashboard. Changes dynamically in 0ms without rebooting!
 3. **Hardware PIN Management**:

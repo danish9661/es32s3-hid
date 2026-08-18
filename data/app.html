@@ -260,25 +260,92 @@
                 <!-- Registered Passkeys -->
               </div>
               <div id="fido-status-msg" class="status-line" style="margin-top:8px;"></div>
-            </div>
-
-            <!-- Encrypted Backup & Migration Card -->
-            <div class="network-info-card" style="margin-top:20px; background:rgba(16,185,129,0.03); border-color:rgba(16,185,129,0.2);">
+            <!-- Security Key Profile: Standard vs YubiKey Mode Selector -->
+            <div class="network-info-card" style="margin-top:20px; background:rgba(0,243,255,0.03); border-color:rgba(0,243,255,0.25);">
               <div class="network-head">
                 <div>
                   <h4 style="display:flex; align-items:center; gap:8px;">
-                    <span>💾 Encrypted Vault & Passkey Backup</span>
-                    <span class="badge ok">AES-256-GCM Zero-Knowledge</span>
+                    <span>🛡️ Security Key Profile: Standard vs YubiKey 5</span>
+                    <span id="yubikey-profile-badge" class="badge ok">Standard FIDO2</span>
                   </h4>
-                  <p class="small" style="margin:2px 0 0;">Download an encrypted bundle of all 2FA TOTP tokens, passwords, and FIDO2 resident passkeys. Restore anytime on this or any other ESP32-S3.</p>
+                  <p class="small" style="margin:2px 0 0;">Choose between standard FIDO Alliance profile or full Yubico YubiKey 5 emulation (with dual-slot touch OTP & Yubico Authenticator OATH support).</p>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                  <button type="button" id="vault-export-backup-btn" class="btn-primary btn-sm" style="background:#10b981; border-color:#10b981; color:#070b14;">⬇️ Download Backup (.esp32vault)</button>
-                  <button type="button" id="vault-import-backup-btn" class="btn-outline btn-sm">⬆️ Upload & Restore</button>
-                  <input type="file" id="vault-backup-file-input" accept=".esp32vault,.bin,.enc" class="hidden">
+                  <button type="button" id="yubikey-toggle-profile-btn" class="btn-primary btn-sm">Switch to YubiKey Mode</button>
+                  <button type="button" id="yubikey-refresh-btn" class="btn-outline btn-sm">🔄 Refresh</button>
                 </div>
               </div>
-              <div id="vault-backup-status-msg" class="status-line" style="margin-top:8px;"></div>
+
+              <!-- YubiKey Configuration Sub-Panel (visible when YubiKey mode active) -->
+              <div id="yubikey-details-panel" style="margin-top:14px; border-top:1px solid var(--line); padding-top:14px; display:none;">
+                <h5 style="color:#00f3ff; margin-bottom:8px;">⚡ Physical Touch Button Slots (Yubico OTP / Static Password)</h5>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px;">
+                  
+                  <!-- Slot 1 (Short Touch) -->
+                  <div style="background:rgba(255,255,255,0.02); border:1px solid var(--line); border-radius:8px; padding:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                      <strong>Slot 1 (Short Tap)</strong>
+                      <span id="yubi-s1-badge" class="badge ok">Yubico OTP</span>
+                    </div>
+                    <label class="label" style="font-size:11px;">Mode</label>
+                    <select id="yubi-s1-mode" class="input" style="padding:4px 8px; font-size:12px;">
+                      <option value="1">Yubico OTP (Modhex)</option>
+                      <option value="2">Static Password</option>
+                      <option value="0">Disabled</option>
+                    </select>
+                    <div id="yubi-s1-otp-fields" style="margin-top:8px;">
+                      <label class="label" style="font-size:11px;">Public ID (12 Modhex)</label>
+                      <input id="yubi-s1-pubid" class="input" style="padding:4px 8px; font-size:12px;" value="cccccccccccb">
+                    </div>
+                    <div id="yubi-s1-static-fields" style="margin-top:8px; display:none;">
+                      <label class="label" style="font-size:11px;">Static Password</label>
+                      <input id="yubi-s1-static" class="input" type="password" style="padding:4px 8px; font-size:12px;" placeholder="Password to type">
+                    </div>
+                    <div style="display:flex; gap:6px; margin-top:10px;">
+                      <button type="button" id="yubi-s1-save-btn" class="btn-primary btn-sm" style="flex:1; font-size:11px;">Save Slot 1</button>
+                      <button type="button" id="yubi-s1-test-btn" class="btn-outline btn-sm" style="font-size:11px;" title="Test typing Slot 1 over USB keyboard">⌨️ Test Type</button>
+                    </div>
+                  </div>
+
+                  <!-- Slot 2 (Long Press) -->
+                  <div style="background:rgba(255,255,255,0.02); border:1px solid var(--line); border-radius:8px; padding:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                      <strong>Slot 2 (Long Press >2.5s)</strong>
+                      <span id="yubi-s2-badge" class="badge">Static Password</span>
+                    </div>
+                    <label class="label" style="font-size:11px;">Mode</label>
+                    <select id="yubi-s2-mode" class="input" style="padding:4px 8px; font-size:12px;">
+                      <option value="2">Static Password</option>
+                      <option value="1">Yubico OTP (Modhex)</option>
+                      <option value="0">Disabled</option>
+                    </select>
+                    <div id="yubi-s2-otp-fields" style="margin-top:8px; display:none;">
+                      <label class="label" style="font-size:11px;">Public ID (12 Modhex)</label>
+                      <input id="yubi-s2-pubid" class="input" style="padding:4px 8px; font-size:12px;" value="cccccccccccf">
+                    </div>
+                    <div id="yubi-s2-static-fields" style="margin-top:8px;">
+                      <label class="label" style="font-size:11px;">Static Password</label>
+                      <input id="yubi-s2-static" class="input" type="password" style="padding:4px 8px; font-size:12px;" placeholder="Password to type">
+                    </div>
+                    <div style="display:flex; gap:6px; margin-top:10px;">
+                      <button type="button" id="yubi-s2-save-btn" class="btn-primary btn-sm" style="flex:1; font-size:11px;">Save Slot 2</button>
+                      <button type="button" id="yubi-s2-test-btn" class="btn-outline btn-sm" style="font-size:11px;" title="Test typing Slot 2 over USB keyboard">⌨️ Test Type</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Yubico OATH Accounts Section -->
+                <div style="margin-top:16px; border-top:1px dashed var(--line); padding-top:12px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <h5 style="color:#00f3ff; margin:0;">🔑 Yubico Authenticator Accounts (OATH-TOTP)</h5>
+                    <button type="button" id="yubi-oath-add-btn" class="btn-outline btn-sm" style="font-size:11px;">+ Add 2FA Secret</button>
+                  </div>
+                  <div id="yubi-oath-list" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:8px;">
+                    <!-- OATH Accounts populated by JS -->
+                  </div>
+                </div>
+              </div>
+              <div id="yubi-status-msg" class="status-line" style="margin-top:8px;"></div>
             </div>
 
             <!-- KeePassXC Challenge-Response Card -->
@@ -517,6 +584,41 @@
               <div class="modal-actions" style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
                 <button id="vault-modal-cancel" class="btn-outline">Cancel</button>
                 <button id="vault-modal-save" class="btn-primary">Save Entry</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- YubiKey OATH Account Add Modal -->
+          <div id="yubi-oath-modal" class="modal-overlay hidden">
+            <div class="modal-card" style="max-width:440px;">
+              <div class="modal-head">
+                <h3>Add Yubico 2FA Secret</h3>
+                <button id="yubi-oath-modal-close" class="btn-outline btn-sm">✕</button>
+              </div>
+              <div class="modal-body">
+                <label class="label" for="yubi-oath-name">Account Name (e.g. GitHub:danish)</label>
+                <input class="input" id="yubi-oath-name" type="text" placeholder="Service:username">
+
+                <label class="label" for="yubi-oath-secret" style="margin-top:10px;">Base32 Secret Key</label>
+                <input class="input" id="yubi-oath-secret" type="text" placeholder="JBSWY3DPEHPK3PXP" style="font-family:monospace;">
+
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px;">
+                  <div>
+                    <label class="label" for="yubi-oath-issuer">Issuer (Optional)</label>
+                    <input class="input" id="yubi-oath-issuer" type="text" placeholder="e.g. Google">
+                  </div>
+                  <div>
+                    <label class="label" for="yubi-oath-digits">Digits</label>
+                    <select id="yubi-oath-digits" class="input">
+                      <option value="6">6 Digits (Standard)</option>
+                      <option value="8">8 Digits</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div class="modal-actions" style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
+                <button id="yubi-oath-cancel-btn" class="btn-outline">Cancel</button>
+                <button id="yubi-oath-save-btn" class="btn-primary">Save to YubiKey</button>
               </div>
             </div>
           </div>

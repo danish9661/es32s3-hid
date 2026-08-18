@@ -3223,6 +3223,7 @@ async function refreshVaultView() {
       lockedCard?.classList.add("hidden");
       unlockedCard?.classList.remove("hidden");
       await loadFidoStatus();
+      await loadYubiKeyStatus();
       await loadVaultEntries();
       startVaultTicker();
     }
@@ -3882,6 +3883,270 @@ function bindBip39Controls() {
   });
 }
 
+// --- YUBIKEY EMULATION JAVASCRIPT CONTROLLER ---
+
+let yubiKeyState = {
+  yubikey_mode: false,
+  serial_number: 17869661,
+  slot1: { mode: 1, public_id: "cccccccccccb" },
+  slot2: { mode: 2, public_id: "cccccccccccf" },
+};
+
+async function loadYubiKeyStatus() {
+  try {
+    const res = await api("/api/yubikey/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    yubiKeyState = data;
+
+    const isYubi = Boolean(data.yubikey_mode);
+    const badge = qs("yubikey-profile-badge");
+    if (badge) {
+      badge.textContent = isYubi ? "YubiKey 5 Mode" : "Standard FIDO2";
+      badge.className = isYubi ? "badge ok" : "badge";
+    }
+
+    const toggleBtn = qs("yubikey-toggle-profile-btn");
+    if (toggleBtn) {
+      toggleBtn.textContent = isYubi ? "Switch to Standard Mode" : "Switch to YubiKey Mode";
+    }
+
+    const details = qs("yubikey-details-panel");
+    if (details) {
+      details.style.display = isYubi ? "block" : "none";
+    }
+
+    // Populate Slot 1
+    if (data.slot1) {
+      setValue("yubi-s1-mode", String(data.slot1.mode));
+      setValue("yubi-s1-pubid", data.slot1.public_id || "cccccccccccb");
+      syncYubiSlotUi(1, data.slot1.mode);
+    }
+
+    // Populate Slot 2
+    if (data.slot2) {
+      setValue("yubi-s2-mode", String(data.slot2.mode));
+      setValue("yubi-s2-pubid", data.slot2.public_id || "cccccccccccf");
+      syncYubiSlotUi(2, data.slot2.mode);
+    }
+
+    if (isYubi) {
+      await loadYubiOathAccounts();
+    }
+  } catch (_) {}
+}
+
+function syncYubiSlotUi(slot, mode) {
+  const isOtp = (Number(mode) === 1);
+  const isStatic = (Number(mode) === 2);
+  const prefix = (slot === 2) ? "yubi-s2" : "yubi-s1";
+
+  const otpFields = qs(`${prefix}-otp-fields`);
+  const staticFields = qs(`${prefix}-static-fields`);
+  const badge = qs(`${prefix}-badge`);
+
+  if (otpFields) otpFields.style.display = isOtp ? "block" : "none";
+  if (staticFields) staticFields.style.display = isStatic ? "block" : "none";
+  if (badge) {
+    if (isOtp) { badge.textContent = "Yubico OTP"; badge.className = "badge ok"; }
+    else if (isStatic) { badge.textContent = "Static Password"; badge.className = "badge"; }
+    else { badge.textContent = "Disabled"; badge.className = "badge"; }
+  }
+}
+
+async function saveYubiSlot(slot) {
+  const prefix = (slot === 2) ? "yubi-s2" : "yubi-s1";
+  const mode = Number(qs(`${prefix}-mode`)?.value || 0);
+  const publicId = qs(`${prefix}-pubid`)?.value.trim() || "";
+  const staticPass = qs(`${prefix}-static`)?.value || "";
+
+  setText("yubi-status-msg", `Saving Slot ${slot}...`);
+  try {
+    const res = await api("/api/yubikey/slot/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot: slot,
+        mode: mode,
+        public_id: publicId,
+        static_password: staticPass,
+        send_enter: true
+      })
+    });
+    if (res.ok) {
+      setText("yubi-status-msg", `✅ Slot ${slot} saved successfully.`);
+      syncYubiSlotUi(slot, mode);
+    } else {
+      setText("yubi-status-msg", `❌ Failed to save Slot ${slot}.`);
+    }
+  } catch (_) {
+    setText("yubi-status-msg", `❌ Network error while saving Slot ${slot}.`);
+  }
+}
+
+async function testYubiSlot(slot) {
+  setText("yubi-status-msg", `Injecting Slot ${slot} over USB keyboard...`);
+  try {
+    const res = await api(`/api/yubikey/slot/test?slot=${slot}`, { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      setText("yubi-status-msg", `✅ Slot ${slot} typed (${data.typed_length} chars).`);
+    } else {
+      setText("yubi-status-msg", `❌ ${data.error || "Failed to type slot"}`);
+    }
+  } catch (_) {
+    setText("yubi-status-msg", "❌ Network error.");
+  }
+}
+
+async function loadYubiOathAccounts() {
+  const container = qs("yubi-oath-list");
+  if (!container) return;
+  try {
+    const res = await api("/api/yubikey/oath/accounts");
+    if (!res.ok) return;
+    const data = await res.json();
+    const accounts = data.accounts || [];
+
+    if (!accounts.length) {
+      container.innerHTML = '<div style="color:var(--muted); font-size:11px; grid-column:1/-1;">No 2FA accounts stored on YubiKey. Click "+ Add 2FA Secret" to add one.</div>';
+      return;
+    }
+
+    container.innerHTML = "";
+    accounts.forEach((acc) => {
+      const card = document.createElement("div");
+      card.style.cssText = "background:rgba(255,255,255,0.03); border:1px solid var(--line); border-radius:6px; padding:8px 10px; display:flex; justify-content:space-between; align-items:center;";
+
+      const left = document.createElement("div");
+      const title = document.createElement("div");
+      title.style.cssText = "font-weight:600; font-size:12px; color:#fff;";
+      title.textContent = acc.name;
+
+      const codeRow = document.createElement("div");
+      codeRow.style.cssText = "display:flex; align-items:center; gap:8px; margin-top:2px;";
+
+      const codeSpan = document.createElement("span");
+      codeSpan.style.cssText = "font-family:'JetBrains Mono', monospace; font-weight:700; font-size:16px; color:#00f3ff; letter-spacing:2px;";
+      codeSpan.textContent = acc.code || "------";
+
+      const remSpan = document.createElement("span");
+      remSpan.style.cssText = "font-size:10px; color:var(--muted);";
+      remSpan.textContent = `${acc.remaining_sec || 30}s`;
+
+      codeRow.appendChild(codeSpan);
+      codeRow.appendChild(remSpan);
+      left.appendChild(title);
+      left.appendChild(codeRow);
+
+      const right = document.createElement("div");
+      right.style.cssText = "display:flex; gap:4px;";
+
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "btn-outline btn-sm";
+      copyBtn.style.cssText = "padding:2px 6px; font-size:10px;";
+      copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", () => {
+        if (acc.code) copyTextToClipboard(acc.code, `Copied ${acc.name} 2FA code`);
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "btn-danger btn-sm";
+      delBtn.style.cssText = "padding:2px 5px; font-size:10px;";
+      delBtn.textContent = "✕";
+      delBtn.title = "Delete account";
+      delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete 2FA account '${acc.name}' from YubiKey?`)) return;
+        try {
+          await api(`/api/yubikey/oath/delete?name=${encodeURIComponent(acc.name)}`, { method: "POST" });
+          loadYubiOathAccounts();
+        } catch (_) {}
+      });
+
+      right.appendChild(copyBtn);
+      right.appendChild(delBtn);
+      card.appendChild(left);
+      card.appendChild(right);
+      container.appendChild(card);
+    });
+  } catch (_) {}
+}
+
+function bindYubiKeyEvents() {
+  qs("yubikey-refresh-btn")?.addEventListener("click", loadYubiKeyStatus);
+
+  qs("yubikey-toggle-profile-btn")?.addEventListener("click", async () => {
+    const nextMode = !yubiKeyState.yubikey_mode;
+    setText("yubi-status-msg", nextMode ? "Enabling YubiKey 5 Profile..." : "Restoring Standard FIDO2 Profile...");
+    try {
+      const res = await api(`/api/yubikey/mode?enabled=${nextMode ? "1" : "0"}`, { method: "POST" });
+      if (res.ok) {
+        await loadYubiKeyStatus();
+        setText("yubi-status-msg", nextMode ? "✅ YubiKey 5 Mode Active! Reboot device to apply USB identity." : "✅ Standard FIDO2 Mode Active! Reboot device to apply.");
+      }
+    } catch (_) {
+      setText("yubi-status-msg", "❌ Failed to change profile.");
+    }
+  });
+
+  qs("yubi-s1-mode")?.addEventListener("change", (e) => syncYubiSlotUi(1, e.target.value));
+  qs("yubi-s2-mode")?.addEventListener("change", (e) => syncYubiSlotUi(2, e.target.value));
+
+  qs("yubi-s1-save-btn")?.addEventListener("click", () => saveYubiSlot(1));
+  qs("yubi-s2-save-btn")?.addEventListener("click", () => saveYubiSlot(2));
+
+  qs("yubi-s1-test-btn")?.addEventListener("click", () => testYubiSlot(1));
+  qs("yubi-s2-test-btn")?.addEventListener("click", () => testYubiSlot(2));
+
+  // OATH Modal Controls
+  const oathModal = qs("yubi-oath-modal");
+  qs("yubi-oath-add-btn")?.addEventListener("click", () => {
+    setValue("yubi-oath-name", "");
+    setValue("yubi-oath-secret", "");
+    setValue("yubi-oath-issuer", "");
+    setValue("yubi-oath-digits", "6");
+    oathModal?.classList.remove("hidden");
+  });
+
+  qs("yubi-oath-modal-close")?.addEventListener("click", () => oathModal?.classList.add("hidden"));
+  qs("yubi-oath-cancel-btn")?.addEventListener("click", () => oathModal?.classList.add("hidden"));
+
+  qs("yubi-oath-save-btn")?.addEventListener("click", async () => {
+    const name = qs("yubi-oath-name")?.value.trim() || "";
+    const secret = qs("yubi-oath-secret")?.value.trim().toUpperCase() || "";
+    const issuer = qs("yubi-oath-issuer")?.value.trim() || "";
+    const digits = Number(qs("yubi-oath-digits")?.value || 6);
+
+    if (!name || !secret) {
+      alert("Name and Base32 secret are required.");
+      return;
+    }
+
+    try {
+      const res = await api("/api/yubikey/oath/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name,
+          secret: secret,
+          issuer: issuer,
+          digits: digits,
+          period: 30,
+          algo: "SHA1"
+        })
+      });
+      if (res.ok) {
+        oathModal?.classList.add("hidden");
+        loadYubiOathAccounts();
+      } else {
+        alert("Failed to save OATH secret to YubiKey.");
+      }
+    } catch (_) {
+      alert("Network error.");
+    }
+  });
+}
+
 function startVaultTicker() {
   if (vaultTickerTimer) clearInterval(vaultTickerTimer);
 
@@ -4253,6 +4518,8 @@ function bindVaultEvents() {
     const val = qs("inspect-pub-key")?.value;
     if (val) copyTextToClipboard(val, "Public Key coordinates copied.");
   });
+
+  bindYubiKeyEvents();
 }
 
 function setupTabs() {

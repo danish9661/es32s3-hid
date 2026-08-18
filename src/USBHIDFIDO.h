@@ -37,6 +37,7 @@ public:
   void end();
   void taskLoop();
   bool isDedicatedMode() const { return pureMode; }
+  USBHID* getHid() { return &hid; }
 
   // USBHIDDevice overrides
   uint16_t _onGetDescriptor(uint8_t *dst) override;

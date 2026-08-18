@@ -1,4 +1,5 @@
 #include "USBHIDFIDO.h"
+#include "YubiKey.h"
 
 #if CONFIG_TINYUSB_HID_ENABLED
 
@@ -244,7 +245,12 @@ void USBHIDFIDO::processCompleteMessage(uint32_t cid, uint8_t cmd, const uint8_t
       cancelPending();
       break;
     default:
-      sendCtapError(cid, 0x01); // CTAP1_ERR_INVALID_CMD
+      if (cmd >= 0xC0) { // CTAPHID Vendor Commands (Yubico Management 0xC0, OATH 0xC1, OTP 0xC2)
+        std::vector<uint8_t> apduResp = YubiKey.processApdu(data, len);
+        sendCtapPacket(cid, cmd, apduResp.data(), apduResp.size());
+      } else {
+        sendCtapError(cid, 0x01); // CTAP1_ERR_INVALID_CMD
+      }
       break;
   }
 }

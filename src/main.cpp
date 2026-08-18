@@ -26,6 +26,7 @@
 #include "mbedtls/base64.h"
 #include "KeePassXC.h"
 #include "Bip39.h"
+#include "YubiKey.h"
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
 #include <cstring>
@@ -5900,6 +5901,129 @@ void registerRoutes() {
     logSystem("[USB] Reset /usb_drive/ to factory defaults");
     request->send(200, "application/json", "{\"ok\":true,\"message\":\"Reset to factory defaults\"}");
   });
+
+  // --- YUBIKEY REST API ROUTES ---
+  server.on("/api/yubikey/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    request->send(200, "application/json", YubiKey.getStatusJson());
+  });
+
+  server.on("/api/yubikey/mode", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    bool enable = false;
+    if (request->hasParam("enabled")) {
+      enable = (request->getParam("enabled")->value() == "1" || request->getParam("enabled")->value() == "true");
+    }
+    YubiKey.setYubiKeyMode(enable);
+    logSystem(enable ? "[YubiKey] YubiKey 5 Emulation Mode ENABLED" : "[YubiKey] Standard FIDO2 Mode RESTORED");
+    request->send(200, "application/json", "{\"ok\":true,\"yubikey_mode\":" + String(enable ? "true" : "false") + "}");
+  });
+
+  server.on("/api/yubikey/slot/config", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(2048);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return;
+      }
+      int slot = doc["slot"] | 1;
+      YubiKeySlotConfig cfg;
+      cfg.mode = static_cast<YubiKeySlotMode>(doc["mode"] | 1);
+      cfg.publicId = doc["public_id"] | "cccccccccccb";
+      cfg.secretKeyHex = doc["secret_key"] | "";
+      cfg.privateIdHex = doc["private_id"] | "";
+      cfg.staticPassword = doc["static_password"] | "";
+      cfg.sendEnter = doc["send_enter"] | true;
+
+      YubiKey.setSlotConfig(slot, cfg);
+      logSystem("[YubiKey] Slot " + String(slot) + " configuration updated");
+      request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+  server.on("/api/yubikey/slot/test", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    int slot = 1;
+    if (request->hasParam("slot")) slot = request->getParam("slot")->value().toInt();
+    if (slot < 1 || slot > 2) slot = 1;
+
+    YubiKeySlotConfig cfg = YubiKey.getSlotConfig(slot);
+    String toType = "";
+    if (cfg.mode == YUBI_SLOT_OTP) {
+      toType = YubiKey.generateOtpString(slot);
+    } else if (cfg.mode == YUBI_SLOT_STATIC) {
+      toType = cfg.staticPassword;
+    }
+
+    if (toType.isEmpty()) {
+      request->send(400, "application/json", "{\"ok\":false,\"error\":\"Slot not configured or disabled\"}");
+      return;
+    }
+
+    if (Keyboard) {
+      Keyboard->print(toType);
+      if (cfg.sendEnter) {
+        delay(10);
+        Keyboard->press(KEY_RETURN);
+        delay(10);
+        Keyboard->release(KEY_RETURN);
+      }
+    }
+    logSystem("[YubiKey] Injected Slot " + String(slot) + " payload via USB Keyboard");
+    request->send(200, "application/json", "{\"ok\":true,\"typed_length\":" + String(toType.length()) + "}");
+  });
+
+  server.on("/api/yubikey/oath/accounts", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    time_t nowSec = time(nullptr);
+    request->send(200, "application/json", YubiKey.getOathAccountsJson(static_cast<uint32_t>(nowSec)));
+  });
+
+  server.on("/api/yubikey/oath/add", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (!requireAuth(request)) return;
+      DynamicJsonDocument doc(2048);
+      if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return;
+      }
+      String name = doc["name"] | "";
+      String secret = doc["secret"] | "";
+      String issuer = doc["issuer"] | "";
+      int digits = doc["digits"] | 6;
+      int period = doc["period"] | 30;
+      String algo = doc["algo"] | "SHA1";
+
+      if (name.isEmpty() || secret.isEmpty()) {
+        request->send(400, "application/json", "{\"ok\":false,\"error\":\"Name and secret are required\"}");
+        return;
+      }
+
+      bool ok = YubiKey.addOathAccount(name, secret, issuer, digits, period, algo);
+      if (ok) {
+        logSystem("[YubiKey] Added OATH account: " + name);
+        request->send(200, "application/json", "{\"ok\":true}");
+      } else {
+        request->send(500, "application/json", "{\"ok\":false,\"error\":\"Failed to add account\"}");
+      }
+    });
+
+  server.on("/api/yubikey/oath/delete", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!requireAuth(request)) return;
+    String name = "";
+    if (request->hasParam("name")) name = request->getParam("name")->value();
+    if (name.isEmpty()) {
+      request->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing account name\"}");
+      return;
+    }
+    bool ok = YubiKey.deleteOathAccount(name);
+    if (ok) {
+      logSystem("[YubiKey] Deleted OATH account: " + name);
+      request->send(200, "application/json", "{\"ok\":true}");
+    } else {
+      request->send(404, "application/json", "{\"ok\":false,\"error\":\"Account not found\"}");
+    }
+  });
 }
 
 void setup() {
@@ -5929,6 +6053,7 @@ void setup() {
   }
 
   KeePassXC::init();
+  YubiKey.init();
   ensureScriptDir();
   ensureActionsDir();
   loadSettings();
@@ -5946,14 +6071,26 @@ void setup() {
   if (LittleFS.exists("/msc_disk.bin")) LittleFS.remove("/msc_disk.bin");
 
   if (fidoSecurityKeyMode) {
-    // Dedicated FIDO2 Hardware Security Key Profile — NO MSC, NO mscDiskBuffer
-    FIDO.begin(true);
-    USB.VID(0x10C4);
-    USB.PID(0x8A2A);
-    USB.manufacturerName("FIDO Alliance");
-    USB.productName("ESP32-S3 FIDO2 Passkey");
-    USB.begin();
-    setStatus(0, 180, 255); // Solid Cyan LED in Passkey Mode!
+    // Dedicated FIDO2 / YubiKey Hardware Security Key Profile — NO MSC, NO mscDiskBuffer
+    if (YubiKey.isYubiKeyMode()) {
+      // YubiKey 5 Mode: Dedicated Yubico FIDO2 Security Key + Yubico APDU Protocol
+      FIDO.begin(true);
+      USB.VID(0x1050); // Yubico
+      USB.PID(0x0407); // YubiKey 5 Series FIDO+CCID
+      USB.manufacturerName("Yubico");
+      USB.productName("YubiKey FIDO+CCID");
+      USB.begin();
+      setStatus(120, 0, 180); // Solid Dark Purple LED in YubiKey Mode!
+    } else {
+      // Standard Passkey Mode: Dedicated Standalone FIDO2 Security Key
+      FIDO.begin(true);
+      USB.VID(0x10C4);
+      USB.PID(0x8A2A);
+      USB.manufacturerName("FIDO Alliance");
+      USB.productName("ESP32-S3 FIDO2 Passkey");
+      USB.begin();
+      setStatus(0, 180, 255); // Solid Cyan LED in Passkey Mode!
+    }
   } else {
     // Normal Ducky Keyboard + Mouse + MSC Profile
     // Allocate here so their constructors (addDevice) only run in normal mode.
@@ -6011,7 +6148,11 @@ void setup() {
   logSystem("[BOOT] ESP32-S3 HID Console initialized (FW: v" + String(FIRMWARE_VERSION) + ")");
   logSystem("[NET] Web Server running. AP IP: " + WiFi.softAPIP().toString() + (WiFi.status() == WL_CONNECTED ? " | STA IP: " + WiFi.localIP().toString() : ""));
   if (fidoSecurityKeyMode) {
-    logSystem("[USB] Dedicated FIDO2 Hardware Passkey active (Cyan LED)");
+    if (YubiKey.isYubiKeyMode()) {
+      logSystem("[USB] Dedicated YubiKey 5 Security Key active (Dark Purple LED)");
+    } else {
+      logSystem("[USB] Dedicated FIDO2 Hardware Passkey active (Cyan LED)");
+    }
   } else {
     logSystem("[USB] Normal Ducky HID + MSC Storage active (Green LED)");
   }
@@ -6059,7 +6200,7 @@ void checkPhysical2faTrigger() {
       fidoSecurityKeyMode = !fidoSecurityKeyMode;
       persistSettings();
       if (fidoSecurityKeyMode) {
-        logSystem("[MODE] Switching to Dedicated FIDO2 Passkey Mode... Rebooting");
+        logSystem("[MODE] Switching to Dedicated Passkey Mode... Rebooting");
       } else {
         logSystem("[MODE] Switching to Normal HID/Ducky Mode... Rebooting");
       }
@@ -6078,7 +6219,40 @@ void checkPhysical2faTrigger() {
           logSystem("[FIDO2] Physical Touch confirmed for " + (rp.isEmpty() ? "Passkey operation" : rp));
           setStatus(0, 255, 60); // Neon Lime Green Confirmation
           delay(300);
-          setStatus(fidoSecurityKeyMode ? 0 : 0, fidoSecurityKeyMode ? 180 : 255, fidoSecurityKeyMode ? 255 : 0);
+          if (!fidoSecurityKeyMode) {
+            setStatus(0, 255, 0); // Green
+          } else if (YubiKey.isYubiKeyMode()) {
+            setStatus(120, 0, 180); // Dark Purple
+          } else {
+            setStatus(0, 180, 255); // Cyan
+          }
+        } else if ((!fidoSecurityKeyMode || YubiKey.isYubiKeyMode()) && YubiKey.getSlotConfig(1).mode != YUBI_SLOT_DISABLED) {
+          // YubiKey Slot 1 Touch Trigger (OTP or Static Password)
+          YubiKeySlotConfig cfg = YubiKey.getSlotConfig(1);
+          String toType = "";
+          if (cfg.mode == YUBI_SLOT_OTP) {
+            toType = YubiKey.generateOtpString(1);
+          } else if (cfg.mode == YUBI_SLOT_STATIC) {
+            toType = cfg.staticPassword;
+          }
+          if (!toType.isEmpty() && Keyboard) {
+            Keyboard->print(toType);
+            if (cfg.sendEnter) {
+              delay(10);
+              Keyboard->press(KEY_RETURN);
+              delay(10);
+              Keyboard->release(KEY_RETURN);
+            }
+            setStatus(0, 255, 60);
+            delay(150);
+            if (!fidoSecurityKeyMode) {
+              setStatus(0, 255, 0);
+            } else if (YubiKey.isYubiKeyMode()) {
+              setStatus(120, 0, 180);
+            } else {
+              setStatus(0, 180, 255);
+            }
+          }
         } else if (!fidoSecurityKeyMode && vaultUnlocked) {
           // Auto-type first TOTP in unlocked vault
           DynamicJsonDocument itemsDoc(8192);
