@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ESP32-S3 HID Console & YubiKey 5A Security Hub</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+  <meta name="description" content="Professional FIDO2 Passkey, YubiKey 5A Emulation, BadUSB, and Web KVM platform for ESP32-S3.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <!-- Modern Dark Theme Stylesheet for Docsify -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-defaults.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple-dark.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css">
+  <style>
+    :root {
+      --base-font-size: 15px;
+      --theme-color: #00f3ff;
+      --sidebar-width: 280px;
+      --sidebar-background: #0d1117;
+      --sidebar-nav-link-color: #8b949e;
+      --sidebar-nav-link-color--hover: #58a6ff;
+      --sidebar-nav-link-color--active: #00f3ff;
+      --code-inline-background: rgba(110,118,129,0.4);
+      --code-block-background: #161b22;
+      --table-row-odd-background: #161b22;
+      --heading-h1-color: #00f3ff;
+      --heading-h2-color: #58a6ff;
+      --heading-h3-color: #7ee787;
+    }
+    .app-name-link {
+      font-weight: 700 !important;
+      color: #00f3ff !important;
+      font-size: 1.15rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+    .badge-ok { background: #238636; color: #fff; }
+    .badge-purple { background: #8957e5; color: #fff; }
+    .badge-cyan { background: #1f6feb; color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="app">Loading documentation...</div>
+  <script>
+    window.$docsify = {
+      name: '🛡️ ESP32-S3 Security Hub',
+      repo: 'https://github.com/danish9661/es32s3-hid',
+      loadSidebar: true,
+      subMaxLevel: 3,
+      auto2top: true,
+      search: {
+        maxAge: 86400000,
+        paths: 'auto',
+        placeholder: 'Search documentation...',
+        noData: 'No results found',
+        depth: 4
+      },
+      copyCode: {
+        buttonText: '📋 Copy',
+        errorText: 'Error',
+        successText: 'Copied!'
+      },
+      pagination: {
+        previousText: 'Previous Page',
+        nextText: 'Next Page',
+        crossChapter: true
+      }
+    }
+  </script>
+  <!-- Docsify Core and Plugins -->
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-pagination/dist/docsify-pagination.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-cpp.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
+</body>
+</html>
